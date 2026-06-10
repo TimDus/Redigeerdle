@@ -384,7 +384,7 @@ async function loadArticle(apiBase, wikiLabel, parseParams) {
   });
   // pin the exact revision so a shared link reproduces the same puzzle
   currentShare = { kind: "custom", wiki: wikiLabel, rev: revid };
-  setStatus("Loaded: " + realTitle + " (title hidden).");
+  setStatus("Article loaded — title hidden. Start guessing!");
 }
 
 async function loadFromFandomUrl(rawUrl) {
