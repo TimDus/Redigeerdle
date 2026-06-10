@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Redigeerdle</title>
+<style>
+  :root {
+    --paper:#f7f6f3; --ink:#1a1a1a; --bar:#1a1a1a; --classified:#c1361f;
+    --marker:#ffd23f; --muted:#6b6b66; --line:#d8d6cf;
+    --mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
+    --serif:Georgia,"Times New Roman",serif;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--paper); color:var(--ink); font-family:var(--serif); line-height:1.7; }
+  .wrap { max-width:760px; margin:0 auto; padding:24px 20px 40px; }
+
+  header { border-bottom:3px solid var(--ink); padding-bottom:14px; margin-bottom:18px; }
+  h1 { font-family:var(--mono); font-weight:700; letter-spacing:.18em; font-size:1.5rem; margin:0; text-transform:uppercase; }
+  h1 .tag { color:var(--classified); }
+  .sub { font-family:var(--mono); font-size:.72rem; color:var(--muted); letter-spacing:.08em; margin-top:4px; }
+
+  .modes { display:flex; gap:8px; margin-bottom:12px; }
+  .modebtn { background:var(--paper); color:var(--ink); }
+  .modebtn.active { background:var(--ink); color:var(--paper); }
+  .newmenu { display:none; flex-direction:column; gap:10px; background:#fff; border:1px solid var(--line); padding:12px; margin-bottom:14px; }
+  .newmenu.open { display:flex; }
+  .newmenu .opts { display:flex; gap:8px; flex-wrap:wrap; }
+  .ownrow { display:none; gap:8px; }
+  .ownrow.show { display:flex; }
+  .ownrow input { flex:1; min-width:180px; font-family:var(--mono); font-size:.82rem; padding:9px 10px; border:1px solid var(--line); background:#fff; }
+
+  .guessbar { display:flex; gap:8px; margin-bottom:6px; position:sticky; top:0; background:var(--paper); padding:10px 0; z-index:5; border-bottom:1px solid var(--line); }
+  #guess { flex:1; font-family:var(--mono); font-size:1rem; padding:11px 12px; border:2px solid var(--ink); background:#fff; color:var(--ink); }
+  #guess:focus { outline:3px solid var(--marker); outline-offset:-1px; }
+  button { font-family:var(--mono); font-weight:700; letter-spacing:.05em; text-transform:uppercase; font-size:.8rem; padding:9px 16px; border:2px solid var(--ink); background:var(--ink); color:var(--paper); cursor:pointer; }
+  button:hover:not(:disabled) { background:var(--classified); border-color:var(--classified); }
+  button:disabled { opacity:.4; cursor:default; }
+
+  .tools { display:flex; gap:8px; margin:4px 0 6px; flex-wrap:wrap; }
+  .tools button { background:var(--paper); color:var(--ink); }
+  .tools button:hover:not(:disabled) { background:var(--ink); color:var(--paper); border-color:var(--ink); }
+
+  .meta { font-family:var(--mono); font-size:.78rem; color:var(--muted); display:flex; gap:18px; margin:10px 0 4px; flex-wrap:wrap; }
+  .meta b { color:var(--ink); }
+  .status { font-family:var(--mono); font-size:.75rem; color:var(--muted); min-height:1.1em; margin-bottom:10px; }
+  .status.err { color:var(--classified); }
+
+  .hintbox { display:none; font-family:var(--serif); font-style:italic; background:#fffbe6; border-left:4px solid var(--marker); padding:10px 12px; margin:6px 0 14px; }
+
+  .history { font-family:var(--mono); font-size:.8rem; margin:8px 0 20px; max-height:120px; overflow-y:auto; }
+  .history .row { display:flex; justify-content:space-between; padding:3px 0; border-bottom:1px dotted var(--line); }
+  .history .row.zero { color:var(--muted); }
+  .history .row .n { font-weight:700; }
+  .history .row .n.hit { color:var(--classified); }
+  .history .row.hintrow { color:var(--classified); }
+
+  article { font-size:1.08rem; }
+  article h2 { font-size:1.5rem; font-family:var(--serif); margin:0 0 14px; }
+  article p { margin:0 0 1em; }
+
+  .red { display:inline-block; background:var(--bar); color:transparent; border-radius:2px; user-select:none; vertical-align:baseline; height:1.05em; line-height:1.05em; }
+  .red .len { font-family:var(--mono); font-size:.7em; color:rgba(255,255,255,.55); padding:0 3px; }
+  .shown { background:transparent; color:var(--ink); }
+  .flash { background:var(--marker); color:var(--ink); transition:background 1.2s ease; }
+
+  /* reveal mode: click a word in the text to reveal it */
+  .arming .red:not(.shown).revealable { cursor:pointer; }
+  .arming .red:not(.shown).revealable:hover { outline:2px solid var(--marker); outline-offset:1px; }
+  .arming .red:not(.shown):not(.revealable) { cursor:not-allowed; }
+
+  .win { margin-top:24px; padding:16px; border:3px double var(--classified); font-family:var(--mono); display:none; }
+  .win.show { display:block; }
+  .win h3 { margin:0 0 6px; color:var(--classified); letter-spacing:.1em; }
+
+  label.opt { font-family:var(--mono); font-size:.75rem; color:var(--muted); display:inline-flex; align-items:center; gap:5px; cursor:pointer; }
+
+  footer { margin-top:40px; padding-top:14px; border-top:1px solid var(--line); font-family:var(--mono); font-size:.72rem; color:var(--muted); line-height:1.6; }
+  footer a { color:var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Red<span class="tag">igeer</span>dle</h1>
+    <div class="sub">Guess the redacted words · find the title</div>
+  </header>
+
+  <div class="modes">
+    <button id="dailyBtn" class="modebtn active">Daily</button>
+    <button id="newBtn" class="modebtn">New game</button>
+  </div>
+  <div class="newmenu" id="newmenu">
+    <div class="opts">
+      <button id="randomBtn">Random article</button>
+      <button id="ownBtn">Add your own link</button>
+    </div>
+    <div class="ownrow" id="ownrow">
+      <input id="url" type="text" placeholder="https://yourwiki.fandom.com/wiki/Article" autocomplete="off">
+      <button id="loadUrlBtn">Load</button>
+    </div>
+  </div>
+
+  <div class="status" id="status">Loading puzzle…</div>
+
+  <div class="guessbar">
+    <input id="guess" type="text" placeholder="type a word and press enter" autocomplete="off" disabled>
+    <button id="go" disabled>Guess</button>
+  </div>
+
+  <div class="tools">
+    <button id="revealBtn" disabled>Reveal a word (3 left)</button>
+    <button id="summaryBtn" disabled>Show hint summary</button>
+    <button id="shareBtn">Share</button>
+  </div>
+
+  <div class="meta">
+    <span>Guesses: <b id="count">0</b></span>
+    <span>Revealed: <b id="pct">0%</b></span>
+    <label class="opt"><input type="checkbox" id="lens" checked> show lengths</label>
+  </div>
+
+  <div class="hintbox" id="hintbox"></div>
+  <div class="history" id="history"></div>
+
+  <article id="article"><h2 id="title"></h2><div id="body"></div></article>
+
+  <div class="win" id="win"><h3>DECLASSIFIED</h3><div id="winText"></div></div>
+
+  <footer id="attribution"></footer>
+</div>
+
+<script>
+/* ----------------------------------------------------------------------
+   The article text is NOT in this source file. It comes from puzzle.json
+   (base64), is decoded only in memory, and individual words are written
+   into the page only once they are guessed correctly. Until then the DOM
+   holds only each word's length, never the word itself.
+   (Anyone who opens the console and decodes the base64 can still peek;
+   that is a deliberately accepted limit.)
+---------------------------------------------------------------------- */
+
+const STOP = new Set(`the a an and or but of to in on at for from with by as is are was were be been being
+it its this that these those he she they we you i his her their our your my not no also
+has have had do does did will would can could may might so if than then there here which
+who whom whose what when where why how all any some more most such into over under about
+after before between during without within up down out off`.split(/\s+/));
+
+let guesses, guessed, tokens, titleKeyWords, titleKeySet, titleToks, bodyToks, META, hintsLeft, summaryText, revealArmed, solved;
+let currentShare = { kind: "daily" };
+const norm = w => w.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+
+// UTF-8-safe base64 decode (keeps accents/punctuation correct)
+function fromB64(b64) {
+  const bin = atob(b64);
+  const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+function tokenize(text, region) {
+  const parts = text.split(/(\p{L}[\p{L}\p{N}'-]*)/u);
+  const out = [];
+  parts.forEach((p, i) => {
+    if (i % 2 === 1) {
+      const key = norm(p);
+      const stop = STOP.has(key);
+      out.push({ word:p, key, stop, revealed:stop, region }); tokens.push(out[out.length-1]);
+    } else if (p) { out.push({ sep:p }); }
+  });
+  return out;
+}
+
+function render(container, toks) {
+  container.innerHTML = "";
+  const showLen = document.getElementById("lens").checked;
+  toks.forEach(t => {
+    if (t.sep !== undefined) { container.appendChild(document.createTextNode(t.sep)); return; }
+    const span = document.createElement("span");
+    span.dataset.key = t.key;
+    if (t.revealed) { span.className = "red shown"; span.textContent = t.word; }
+    else {
+      // only the length goes into the DOM, not the word
+      span.className = "red";
+      if (t.region === "body" && !titleKeySet.has(t.key)) span.classList.add("revealable");
+      span.style.width = (t.word.length * 0.62 + 0.5) + "em";
+      if (showLen) { const l = document.createElement("span"); l.className="len"; l.textContent=t.word.length; span.appendChild(l); }
+    }
+    container.appendChild(span);
+  });
+}
+
+function draw() {
+  render(document.getElementById("title"), titleToks);
+  render(document.getElementById("body"), bodyToks);
+}
+
+function flashKey(key) {
+  document.querySelectorAll('[data-key="'+key+'"]').forEach(el => {
+    if (el.classList.contains("shown")) { el.classList.add("flash"); requestAnimationFrame(() => el.classList.remove("flash")); }
+  });
+}
+
+function refreshMeta() {
+  document.getElementById("count").textContent = guesses.length;
+  const total = tokens.filter(t => !t.stop).length || 1;
+  const shown = tokens.filter(t => !t.stop && t.revealed).length;
+  document.getElementById("pct").textContent = Math.round(shown/total*100) + "%";
+  const h = document.getElementById("history"); h.innerHTML = "";
+  [...guesses].reverse().forEach(g => {
+    const row = document.createElement("div");
+    row.className = "row" + (g.hint ? " hintrow" : (g.hits ? "" : " zero"));
+    const label = g.hint ? g.word + " (revealed)" : g.word;
+    row.innerHTML = "<span>"+label+"</span><span class='n "+(g.hits?"hit":"")+"'>"+g.hits+"</span>";
+    h.appendChild(row);
+  });
+}
+
+function attribution(solved) {
+  const f = document.getElementById("attribution");
+  const lic = META.license || { name:"Unknown", url:"" };
+  const licLink = lic.url ? `<a href="${lic.url}" target="_blank" rel="noopener">${lic.name}</a>` : lic.name;
+  if (solved) {
+    const src = META.source || {};
+    const titleLink = src.revision_url
+      ? `<a href="${src.revision_url}" target="_blank" rel="noopener">${META.title}</a>`
+      : META.title;
+    f.innerHTML = `Source: ${titleLink} — ${src.wiki || ""}. ${META.adapted_note || ""} License: ${licLink}.`;
+  } else {
+    f.innerHTML = `Source: an article from ${(META.source||{}).wiki || "a Fandom wiki"} `
+      + `(license: ${licLink}). Full attribution appears after you finish.`;
+  }
+}
+
+function checkWin() {
+  if (titleKeyWords.length && titleKeyWords.every(t => t.revealed)) {
+    solved = true;
+    // reveal the whole article (and title) now that the game is over
+    tokens.forEach(t => t.revealed = true);
+    draw();
+    document.getElementById("win").classList.add("show");
+    const reveals = guesses.filter(g => g.hint).length;
+    document.getElementById("winText").textContent =
+      'Title: "' + META.title + '" — solved in ' + guesses.length + ' guesses'
+      + (reveals ? ' (' + reveals + ' revealed)' : '') + '.';
+    document.getElementById("guess").disabled = true;
+    document.getElementById("go").disabled = true;
+    document.getElementById("revealBtn").disabled = true;
+    document.getElementById("body").classList.remove("arming");
+    revealArmed = false;
+    refreshMeta();
+    attribution(true);
+  }
+}
+
+function applyGuess(key, raw, isHint) {
+  let hits = 0, word = raw;
+  tokens.forEach(t => { if (!t.revealed && t.key === key) { t.revealed = true; word = t.word; hits++; } });
+  guesses.push({ word: isHint ? word : raw, hits, hint: !!isHint });
+  guessed.add(key);
+  draw(); flashKey(key); refreshMeta(); checkWin();
+  return hits;
+}
+
+function submitGuess() {
+  const input = document.getElementById("guess");
+  const raw = input.value.trim(); const key = norm(raw); input.value = "";
+  if (!key || guessed.has(key)) return;
+  applyGuess(key, raw, false);
+}
+
+// reveal mode: arm with the button, then click a word in the text.
+// title words are locked (can't be revealed for free). max 3 reveals.
+function setStatus(msg) { document.getElementById("status").textContent = msg; }
+
+function disarm() {
+  revealArmed = false;
+  document.getElementById("body").classList.remove("arming");
+  updateRevealBtn();
+}
+
+function toggleArm() {
+  if (hintsLeft <= 0) return;
+  revealArmed = !revealArmed;
+  document.getElementById("body").classList.toggle("arming", revealArmed);
+  updateRevealBtn();
+  if (revealArmed) setStatus("Pick a word in the text to reveal — title words are locked.");
+}
+
+function handleBodyClick(e) {
+  if (!revealArmed) return;
+  const body = document.getElementById("body");
+  const span = e.target.closest(".red");
+  if (!span || !body.contains(span) || span.classList.contains("shown")) return;
+  const key = span.dataset.key;
+  if (titleKeySet.has(key)) { setStatus("That's a title word — you can't reveal those."); return; }
+  applyGuess(key, "", true);
+  hintsLeft--;
+  disarm();
+  setStatus("Word revealed — " + hintsLeft + " reveal(s) left.");
+}
+
+function updateRevealBtn() {
+  const b = document.getElementById("revealBtn");
+  if (hintsLeft <= 0) { b.textContent = "No reveals left"; b.disabled = true; return; }
+  b.disabled = false;
+  b.textContent = revealArmed ? "Pick a word… (cancel)" : "Reveal a word (" + hintsLeft + " left)";
+}
+
+function showSummary() {
+  const box = document.getElementById("hintbox");
+  box.textContent = summaryText || "(no summary provided for this puzzle)";
+  box.style.display = "block";
+  document.getElementById("summaryBtn").disabled = true;
+}
+
+function initGame(title, text, meta) {
+  META = { ...meta, title };
+  summaryText = meta.summary || "";
+  guesses = []; guessed = new Set(); tokens = []; hintsLeft = 3; revealArmed = false; solved = false;
+  titleToks = tokenize(title, "title");
+  bodyToks = tokenize(text, "body");
+  titleKeyWords = tokens.filter(t => t.region === "title" && !t.stop);
+  titleKeySet = new Set(titleKeyWords.map(t => t.key));
+  document.getElementById("win").classList.remove("show");
+  document.getElementById("body").classList.remove("arming");
+  const box = document.getElementById("hintbox"); box.style.display = "none"; box.textContent = "";
+  document.getElementById("guess").disabled = false;
+  document.getElementById("go").disabled = false;
+  document.getElementById("summaryBtn").disabled = !summaryText;
+  updateRevealBtn();
+  document.getElementById("guess").focus();
+  draw(); refreshMeta(); attribution(false);
+}
+
+/* ---- Fandom helpers, used by "Add your own link" (client-side, live) ---- */
+function parseFandomUrl(raw) {
+  const u = new URL(raw.trim());
+  const m = u.pathname.match(/^(\/[a-z]{2,3})?\/wiki\/(.+)$/i);
+  if (!m) throw new Error("Not a valid Fandom /wiki/ URL.");
+  const langPrefix = m[1] || "";
+  const title = decodeURIComponent(m[2]).replace(/_/g, " ");
+  return { apiBase: u.protocol + "//" + u.host + langPrefix + "/api.php", host: u.host, langPrefix, title };
+}
+
+async function apiGet(apiBase, params) {
+  // origin=* enables anonymous cross-origin access from the browser
+  const url = apiBase + "?" + new URLSearchParams({ ...params, format: "json", origin: "*" }).toString();
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.info || "API error");
+  return data;
+}
+
+function cleanArticleHtml(html) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  doc.querySelectorAll("table, figure, sup.reference, .reference, style, script, .mw-editsection, .navbox, .infobox, .toc, .mw-empty-elt, aside, .portable-infobox").forEach(e => e.remove());
+  return [...doc.querySelectorAll("p")]
+    .map(p => p.textContent.replace(/\[\d+\]/g, "").replace(/\s+/g, " ").trim())
+    .filter(t => t.length > 0).join("\n\n");
+}
+
+// shared core: load an article by page title or by revision (oldid)
+async function loadArticle(apiBase, wikiLabel, parseParams) {
+  setStatus("Loading article…");
+  const parsed = await apiGet(apiBase, { action: "parse", prop: "text|revid", redirects: "1", formatversion: "2", ...parseParams });
+  const realTitle = parsed.parse.title;
+  const revid = parsed.parse.revid;
+  const rawHtml = parsed.parse.text;
+  const text = cleanArticleHtml(typeof rawHtml === "string" ? rawHtml : rawHtml["*"]);
+  if (!text) throw new Error("No readable paragraphs found.");
+  let license = { name: "Unknown", url: "" };
+  try {
+    const si = await apiGet(apiBase, { action: "query", meta: "siteinfo", siprop: "rightsinfo", formatversion: "2" });
+    const r = si.query && si.query.rightsinfo;
+    if (r && (r.text || r.url)) license = { name: r.text || "See wiki", url: r.url || "" };
+  } catch { /* license not critical */ }
+  const base = apiBase.replace(/\/api\.php$/, "");
+  initGame(realTitle, text, {
+    source: { wiki: wikiLabel, revision_id: revid,
+      url: base + "/wiki/" + encodeURIComponent(realTitle.replace(/ /g, "_")),
+      revision_url: base + "/index.php?oldid=" + revid },
+    license, adapted_note: "Text shortened and adapted (redacted) for this game.", summary: ""
+  });
+  // pin the exact revision so a shared link reproduces the same puzzle
+  currentShare = { kind: "custom", wiki: wikiLabel, rev: revid };
+  setStatus("Loaded: " + realTitle + " (title hidden).");
+}
+
+async function loadFromFandomUrl(rawUrl) {
+  const status = document.getElementById("status"); status.className = "status";
+  try {
+    const { apiBase, host, langPrefix, title } = parseFandomUrl(rawUrl);
+    await loadArticle(apiBase, host + langPrefix, { page: title });
+    closeMenu();
+  } catch (e) {
+    status.className = "status err";
+    setStatus("Load failed: " + e.message + " — some wikis block cross-origin requests.");
+  }
+}
+
+async function loadFromRevision(wiki, rev) {
+  const status = document.getElementById("status"); status.className = "status";
+  try {
+    await loadArticle("https://" + wiki + "/api.php", wiki, { oldid: rev });
+  } catch (e) {
+    status.className = "status err";
+    setStatus("Couldn't open the shared puzzle: " + e.message + " — try the Daily button.");
+  }
+}
+
+async function loadRandomFromSupabase() {
+  // PLACEHOLDER: later this picks a random puzzle row from Supabase.
+  // No backend yet, so for now it just reuses the sample puzzle.json.
+  await loadPuzzle();
+  setStatus("Random game (placeholder): Supabase isn't connected yet — showing the sample puzzle.");
+  closeMenu();
+}
+
+/* ---- share ---- */
+function buildShareUrl() {
+  const base = location.origin + location.pathname;
+  if (currentShare.kind === "custom" && currentShare.wiki && currentShare.rev) {
+    return base + "?wiki=" + encodeURIComponent(currentShare.wiki) + "&rev=" + encodeURIComponent(currentShare.rev);
+  }
+  return base + "?p=daily";
+}
+
+function buildShareText() {
+  const n = guesses.length;
+  const reveals = guesses.filter(g => g.hint).length;
+  const tail = reveals ? " (incl. " + reveals + " revealed)" : "";
+  if (solved) return "Redigeerdle — I solved it in " + n + " guesses" + tail + ". Can you do better?";
+  if (n === 0) return "Redigeerdle — try this redacted article. Can you find the title?";
+  return "Redigeerdle — I'm at " + n + " guesses" + tail + " so far. Can you find the title?";
+}
+
+async function doShare() {
+  const url = buildShareUrl();
+  const text = buildShareText();
+  const full = text + " " + url;
+  try {
+    if (navigator.share) { await navigator.share({ title: "Redigeerdle", text, url }); setStatus("Shared."); return; }
+    await navigator.clipboard.writeText(full);
+    setStatus("Link copied to clipboard — paste it to a friend.");
+  } catch {
+    try { await navigator.clipboard.writeText(full); setStatus("Link copied to clipboard."); }
+    catch { setStatus("Copy this link: " + full); }
+  }
+}
+
+/* ---- top menu ---- */
+function setMode(which) {
+  document.getElementById("dailyBtn").classList.toggle("active", which === "daily");
+  document.getElementById("newBtn").classList.toggle("active", which === "new");
+}
+function closeMenu() {
+  document.getElementById("newmenu").classList.remove("open");
+  document.getElementById("ownrow").classList.remove("show");
+}
+
+/* ---- load the puzzle (from puzzle.json now; identical from Supabase later) ---- */
+async function loadPuzzle() {
+  const status = document.getElementById("status");
+  try {
+    const res = await fetch("puzzle.json", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const p = await res.json();
+    initGame(fromB64(p.title_b64), fromB64(p.text_b64), {
+      source: p.source, license: p.license, adapted_note: p.adapted_note,
+      summary: p.summary_b64 ? fromB64(p.summary_b64) : ""
+    });
+    currentShare = { kind: "daily" };
+    status.textContent = "Puzzle " + (p.id || "") + " loaded — title hidden.";
+  } catch (e) {
+    status.className = "status err";
+    status.textContent = "Load failed: " + e.message + " — run this via a server (Live Server), not as a file.";
+  }
+}
+
+document.getElementById("go").addEventListener("click", submitGuess);
+document.getElementById("guess").addEventListener("keydown", e => { if (e.key === "Enter") submitGuess(); });
+document.getElementById("revealBtn").addEventListener("click", toggleArm);
+document.getElementById("body").addEventListener("click", handleBodyClick);
+document.getElementById("summaryBtn").addEventListener("click", showSummary);
+document.getElementById("lens").addEventListener("change", () => { if (tokens) draw(); });
+
+document.getElementById("dailyBtn").addEventListener("click", () => { closeMenu(); setMode("daily"); loadPuzzle(); });
+document.getElementById("newBtn").addEventListener("click", () => {
+  const m = document.getElementById("newmenu");
+  if (m.classList.contains("open")) { closeMenu(); setMode("daily"); }
+  else { m.classList.add("open"); setMode("new"); }
+});
+document.getElementById("randomBtn").addEventListener("click", loadRandomFromSupabase);
+document.getElementById("ownBtn").addEventListener("click", () => {
+  document.getElementById("ownrow").classList.add("show");
+  document.getElementById("url").focus();
+});
+document.getElementById("loadUrlBtn").addEventListener("click", () => { const v = document.getElementById("url").value; if (v) loadFromFandomUrl(v); });
+document.getElementById("url").addEventListener("keydown", e => { if (e.key === "Enter") { const v = e.target.value; if (v) loadFromFandomUrl(v); } });
+document.getElementById("shareBtn").addEventListener("click", doShare);
+
+// boot: a shared link (?wiki=&rev=) reproduces the exact same puzzle; otherwise the daily
+(function boot() {
+  const q = new URLSearchParams(location.search);
+  const wiki = q.get("wiki"), rev = q.get("rev");
+  if (wiki && rev) loadFromRevision(wiki, rev);
+  else loadPuzzle();
+})();
+</script>
+</body>
+</html>
