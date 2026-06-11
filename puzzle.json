@@ -1,18 +1,7 @@
 {
   "id": "2026-06-10",
-  "title_b64": "TGlnaHRob3VzZQ==",
-  "text_b64": "QSBsaWdodGhvdXNlIGlzIGEgdG93ZXIgb3IgYnVpbGRpbmcgZGVzaWduZWQgdG8gZW1pdCBsaWdodCBmcm9tIGEgc3lzdGVtIG9mIGxhbXBzIGFuZCBsZW5zZXMuIEl0cyBwdXJwb3NlIGlzIHRvIGFjdCBhcyBhIG5hdmlnYXRpb25hbCBhaWQgZm9yIHNoaXBzIGF0IHNlYSBvciBvbiBpbmxhbmQgd2F0ZXJ3YXlzLgoKTGlnaHRob3VzZXMgbWFyayBkYW5nZXJvdXMgY29hc3RsaW5lcywgc2hhbGxvdyB3YXRlcnMgYW5kIHJlZWZzLCBhbmQgdGhleSBwb2ludCBvdXQgc2FmZSBlbnRyYW5jZXMgdG8gaGFyYm91cnMuIEEga2VlcGVyIHdhcyBvbmNlIG5lZWRlZCB0byB0ZW5kIHRoZSBsYW1wLCBidXQgdG9kYXkgbW9zdCBvZiB0aGVtIGFyZSBhdXRvbWF0ZWQuCgpUaGUgbGlnaHQgc291cmNlIGluIGVhcmx5IHRvd2VycyB3YXMgYW4gb3BlbiBmaXJlLCBsYXRlciBjYW5kbGVzIGFuZCBldmVudHVhbGx5IG9pbCBsYW1wcy4gTW9kZXJuIG9uZXMgb2Z0ZW4gdXNlIGVsZWN0cmljIGxhbXBzIGFuZCByb3RhdGluZyBsZW5zZXMgdG8gcHJvZHVjZSBhIHJlY29nbmlzYWJsZSBwYXR0ZXJuIG9mIGZsYXNoZXMu",
-  "summary_b64": "QSB0YWxsIHN0cnVjdHVyZSBidWlsdCBuZWFyIHRoZSB3YXRlciB0aGF0IGd1aWRlcyB0cmF2ZWxsZXJzIGFuZCB3YXJucyB0aGVtIG9mIGRhbmdlciwgZXNwZWNpYWxseSBhZnRlciBkYXJrLg==",
-  "source": {
-    "wiki": "example.fandom.com",
-    "page_id": 0,
-    "revision_id": 0,
-    "url": "https://example.fandom.com/wiki/Lighthouse",
-    "revision_url": "https://example.fandom.com/index.php?oldid=0"
-  },
-  "license": {
-    "name": "CC BY-SA 4.0",
-    "url": "https://www.fandom.com/licensing"
-  },
-  "adapted_note": "Text shortened and adapted (redacted) for this game."
+  "date": "2026-06-10",
+  "wiki": "harrypotter.fandom.com",
+  "revision_id": 2006074,
+  "summary": "A small winged ball; catching it ends the match and scores big."
 }
