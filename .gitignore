@@ -1,0 +1,19 @@
+# secrets / local env
+.env
+.env.*
+
+# dependencies
+node_modules/
+
+# Playwright
+test-results/
+playwright-report/
+playwright/.cache/
+
+# temp / scratch files
+_*.mjs
+_*.png
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db

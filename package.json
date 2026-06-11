@@ -1,0 +1,14 @@
+{
+  "name": "redacbennar",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Redigeerdle — guess the redacted words",
+  "scripts": {
+    "serve": "node tests/static-server.mjs",
+    "test": "playwright test",
+    "puzzle:auto": "node scripts/pick-daily.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
+  }
+}
