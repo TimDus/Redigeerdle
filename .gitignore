@@ -13,6 +13,7 @@ playwright/.cache/
 # temp / scratch files
 _*.mjs
 _*.png
+.tmp/
 
 # OS / editor cruft
 .DS_Store

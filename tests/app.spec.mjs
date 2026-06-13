@@ -177,7 +177,7 @@ test("sign-in panel opens with both login methods", async ({ page }) => {
   // logged out to start: the Sign in button is offered
   await expect(page.locator("#authToggle")).toBeVisible();
   await page.click("#authToggle");
-  await expect(page.locator("#authpanel")).toHaveClass(/open/);
+  await expect(page.locator("#authmodal")).toHaveClass(/open/);   // opens as a popup
   // both login methods are present
   await expect(page.locator("#googleBtn")).toBeVisible();
   await expect(page.locator("#authEmail")).toBeVisible();
@@ -212,19 +212,37 @@ test("New game opens a modal with three options and closes", async ({ page }) =>
   await expect(page.locator("#newmodal")).not.toHaveClass(/open/);
 });
 
-test("New game: 'Random from a fandom' reveals an autocomplete of wikis", async ({ page }) => {
+test("New game: 'Random from a fandom' shows a searchable fandom list", async ({ page }) => {
   await page.click("#newBtn");
   await page.click("#fandomRandomBtn");
   await expect(page.locator("#fandomrow")).toHaveClass(/show/);
   await expect(page.locator("#fandomSearch")).toBeVisible();
-  // datalist populated from the wikis table
-  await expect(page.locator("#fandomList option")).toHaveCount(2);
-  await expect(page.locator('#fandomList option[value="harrypotter.fandom.com"]')).toHaveCount(1);
+  // a visual list built from the wikis table (stubbed: 2 hosts)
+  const opts = page.locator("#fandomPickList .fandomopt");
+  await expect(opts).toHaveCount(2);
+  await expect(page.locator('#fandomPickList .fandomopt[data-host="harrypotter.fandom.com"]')).toHaveCount(1);
+  // the search box narrows the list live
+  await page.fill("#fandomSearch", "zelda");
+  await expect(opts.filter({ hasText: "zelda" })).toBeVisible();
+  await expect(opts.filter({ hasText: "harrypotter" })).toBeHidden();
+  // a "Curated search" toggle, on by default, controls whether the picker-style
+  // quality search is used for the chosen fandom
+  await expect(page.locator("#fandomCurated")).toBeChecked();
 });
 
-test("leaderboard panel toggles open", async ({ page }) => {
+test("How to play opens a modal explaining the game and closes", async ({ page }) => {
+  await expect(page.locator("#helpmodal")).not.toHaveClass(/open/);
+  await page.click("#helpBtn");
+  await expect(page.locator("#helpmodal")).toHaveClass(/open/);
+  await expect(page.locator("#helpmodal")).toContainText("blacked out");
+  await expect(page.locator("#helpmodal")).toContainText("title");
+  await page.click("#helpClose");
+  await expect(page.locator("#helpmodal")).not.toHaveClass(/open/);
+});
+
+test("leaderboard popup opens", async ({ page }) => {
   await page.click("#boardBtn");
-  await expect(page.locator("#board")).toHaveClass(/show/);
+  await expect(page.locator("#boardmodal")).toHaveClass(/open/);
   // some content is rendered (a message or rows), not left blank
   await expect(page.locator("#boardList")).not.toBeEmpty();
 });
@@ -242,6 +260,49 @@ test("loads a pinned revision live from a real wiki", async ({ page }) => {
   expect(await page.locator("#body .red").count()).toBeGreaterThan(20);
 });
 
+test("clicking a guessed word in the history cycles through its occurrences in the text", async ({ page }) => {
+  await page.goto("/?wiki=harrypotter.fandom.com&rev=2006074");
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+  // find two distinct non-stop body words that each occur at least twice
+  const info = await page.evaluate(() => {
+    const counts = {};
+    tokens.forEach(t => { if (t.region === "body" && !t.stop && t.key) counts[t.key] = (counts[t.key] || 0) + 1; });
+    const multi = Object.keys(counts).filter(k => counts[k] >= 2);
+    return { key: multi[0], n: counts[multi[0]], key2: multi[1] };
+  });
+  expect(info.key).toBeTruthy();
+  expect(info.n).toBeGreaterThanOrEqual(2);
+  expect(info.key2).toBeTruthy();
+  // guess it
+  await page.fill("#guess", info.key);
+  await page.press("#guess", "Enter");
+  // its history row is navigable and carries the key
+  const row = page.locator('#history .row.nav[data-key="' + info.key + '"]');
+  await expect(row).toHaveCount(1);
+  // every occurrence is now shown in the body
+  expect(await page.locator('#body span.shown[data-key="' + info.key + '"]').count()).toBe(info.n);
+  // clicking advances the cursor one hit at a time…
+  await row.click();
+  expect(await page.evaluate(k => wordNav.get(k), info.key)).toBe(1);
+  // every occurrence is marked, and exactly one (the jumped-to one) is distinct
+  expect(await page.locator('#body span.locate-active[data-key="' + info.key + '"]').count()).toBe(1);
+  expect(await page.locator('#body span.locate[data-key="' + info.key + '"]').count()).toBe(info.n - 1);
+  await row.click();
+  expect(await page.evaluate(k => wordNav.get(k), info.key)).toBe(2);
+  // …and wraps back to the first after the last occurrence
+  for (let i = 2; i < info.n; i++) await row.click();   // now at n
+  await row.click();                                     // one past the end → wrap
+  expect(await page.evaluate(k => wordNav.get(k), info.key)).toBe(1);
+
+  // picking a DIFFERENT word starts that word at occurrence 1 and resets the old one
+  await page.fill("#guess", info.key2);
+  await page.press("#guess", "Enter");
+  const row2 = page.locator('#history .row.nav[data-key="' + info.key2 + '"]');
+  await row2.click();
+  expect(await page.evaluate(k => wordNav.get(k), info.key2)).toBe(1);          // new word: occurrence 1
+  expect(await page.evaluate(k => wordNav.has(k), info.key)).toBe(false);       // previous word: cursor reset
+});
+
 test("article body keeps its block structure (paragraphs + headings)", async ({ page }) => {
   await page.goto("/?wiki=harrypotter.fandom.com&rev=2006074");
   await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
@@ -249,4 +310,109 @@ test("article body keeps its block structure (paragraphs + headings)", async ({ 
   expect(await page.locator("#body > p").count()).toBeGreaterThan(2);
   // section headings are preserved as elements
   expect(await page.locator("#body h2, #body h3").count()).toBeGreaterThan(0);
+});
+
+test("Settings opens a daily-feed fandom list built from the wikis table", async ({ page }) => {
+  await page.click("#settingsBtn");
+  await expect(page.locator("#settingsmodal")).toHaveClass(/open/);
+  // logged out → saved on this device
+  await expect(page.locator("#settingsNote")).toContainText("device");
+  // one row per wiki from the (stubbed) wikis table
+  const rows = page.locator("#followList .followrow");
+  await expect(rows).toHaveCount(2);
+  await expect(page.locator('#followList input[data-wiki="harrypotter.fandom.com"]')).toHaveCount(1);
+  await expect(page.locator('#followList input[data-wiki="zelda.fandom.com"]')).toHaveCount(1);
+  // searching narrows the list to matching fandoms
+  await page.fill("#followSearch", "harry");
+  await expect(page.locator('#followList .followrow', { hasText: "harrypotter" })).toBeVisible();
+  await expect(page.locator('#followList .followrow', { hasText: "zelda" })).toBeHidden();
+  await page.fill("#followSearch", "");
+  await expect(page.locator('#followList .followrow', { hasText: "zelda" })).toBeVisible();
+  // clicking the dimmed backdrop closes it
+  await page.locator("#settingsmodal").click({ position: { x: 5, y: 5 } });
+  await expect(page.locator("#settingsmodal")).not.toHaveClass(/open/);
+});
+
+test("layout: the two-column play area is the default (article | controls grid)", async ({ page }) => {
+  // wide is now the base layout — #playarea is a CSS grid on a desktop-width viewport
+  await page.setViewportSize({ width: 1200, height: 900 });
+  await expect(page.locator("#playarea")).toHaveCSS("display", "grid");
+  // and the controls column is the sticky right-hand cell
+  await expect(page.locator("#controlcol")).toHaveCSS("position", "sticky");
+  // Settings no longer carries a Layout section — Daily feed is the only one
+  await page.click("#settingsBtn");
+  const headers = page.locator("#settingsmodal .settings-h");
+  await expect(headers).toHaveCount(1);
+  await expect(headers.first()).toHaveText("Daily feed");
+});
+
+test("layout: collapses to a single column on a narrow viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 600, height: 900 });
+  // below the 880px breakpoint #playarea is display:contents — single column
+  await expect(page.locator("#playarea")).toHaveCSS("display", "contents");
+});
+
+test("layout: the top bar is a sticky header and publishes its height as --header-h", async ({ page }) => {
+  await expect(page.locator(".topbar")).toHaveCSS("position", "sticky");
+  await expect(page.locator(".topbar")).toHaveCSS("top", "0px");
+  // JS measures the header and exposes --header-h so the sticky controls pin below it
+  const h = await page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue("--header-h").trim());
+  expect(h).toMatch(/^\d+(\.\d+)?px$/);
+  expect(parseFloat(h)).toBeGreaterThan(40);
+});
+
+test("the daily-feed dropdown toggles from the header and prompts you to follow fandoms when none are chosen", async ({ page }) => {
+  // closed by default — it's a header dropdown now
+  await expect(page.locator("#feed")).not.toHaveClass(/open/);
+  await page.click("#feedBtn");
+  await expect(page.locator("#feed")).toHaveClass(/open/);
+  // no follows set → a prompt (puzzles stubbed empty)
+  await expect(page.locator("#feedCards")).toContainText("Follow fandoms in Settings");
+  // clicking the button again collapses it
+  await page.click("#feedBtn");
+  await expect(page.locator("#feed")).not.toHaveClass(/open/);
+});
+
+test("Settings: following a fandom persists to localStorage and survives reload (logged out)", async ({ page }) => {
+  await page.click("#settingsBtn");
+  await page.locator('#followList input[data-wiki="harrypotter.fandom.com"]').check();
+  // written to the local cache
+  const stored = await page.evaluate(() => localStorage.getItem("redigeerdle:follows"));
+  expect(stored).toContain("harrypotter.fandom.com");
+  // reload → the choice comes back checked
+  await page.reload();
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+  await page.click("#settingsBtn");
+  await expect(page.locator('#followList input[data-wiki="harrypotter.fandom.com"]')).toBeChecked();
+  await expect(page.locator('#followList input[data-wiki="zelda.fandom.com"]')).not.toBeChecked();
+});
+
+test("custom-link parser handles Fandom, Wikipedia, minecraft.wiki and ?title= URLs", async ({ page }) => {
+  const cases = await page.evaluate(() => [
+    "https://harrypotter.fandom.com/wiki/Golden_Snitch",
+    "https://harrypotter.fandom.com/de/wiki/Goldener_Schnatz",
+    "https://en.wikipedia.org/wiki/Cat",
+    "https://minecraft.wiki/w/Block_of_Resin",
+    "https://wiki.guildwars2.com/wiki/Guild_Wars_2",
+    "https://wiki.guildwars2.com/index.php?title=Mesmer",
+  ].map(u => { try { return parseWikiUrl(u); } catch (e) { return { error: e.message }; } }));
+  expect(cases[0]).toMatchObject({ host: "harrypotter.fandom.com", langPrefix: "", title: "Golden Snitch" });
+  expect(cases[1]).toMatchObject({ host: "harrypotter.fandom.com", langPrefix: "/de", title: "Goldener Schnatz" });
+  expect(cases[2]).toMatchObject({ host: "en.wikipedia.org", title: "Cat" });
+  expect(cases[3]).toMatchObject({ host: "minecraft.wiki", title: "Block of Resin" });   // /w/ path
+  expect(cases[4]).toMatchObject({ host: "wiki.guildwars2.com", title: "Guild Wars 2" });
+  expect(cases[5]).toMatchObject({ host: "wiki.guildwars2.com", title: "Mesmer" });       // ?title=
+});
+
+// End-to-end proof for a non-Fandom wiki: Wikipedia's API is at /w/api.php, so
+// resolveApiBase must discover it. Needs network.
+test("Custom link loads a Wikipedia article (auto-resolves /w/api.php)", async ({ page }) => {
+  await page.click("#newBtn");
+  await page.click("#ownBtn");
+  await page.fill("#url", "https://en.wikipedia.org/wiki/Cat");
+  await page.click("#loadUrlBtn");
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 25_000 });
+  await expect(page.locator("#title .red:not(.shown)").first()).toBeVisible();   // title redacted
+  expect(await page.locator("#body .red").count()).toBeGreaterThan(20);          // redacted body
 });

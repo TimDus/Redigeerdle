@@ -24,7 +24,7 @@ revision, and only words you guess get written into the page.
   - **Curated random** — a quality-checked random article.
   - **Full random** — anything from the wiki pool.
   - **Random from a fandom** — pick a wiki, get a random page from it.
-  - **Custom link** — paste any Fandom article URL.
+  - **Custom link** — paste any MediaWiki article URL (Fandom, Wikipedia, minecraft.wiki, wiki.guildwars2.com, …).
 
 ## Running locally
 

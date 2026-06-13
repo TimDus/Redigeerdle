@@ -72,13 +72,10 @@ so the picker never repeats one.
    - `SUPABASE_URL` = `https://YOUR-PROJECT.supabase.co`
    - `SUPABASE_SERVICE_ROLE_KEY` = the **service_role** key from Supabase
      **Settings → API** (the secret one, *not* the publishable/anon key).
-   - *(optional)* `GROQ_API_KEY` = a Groq API key (free tier at
-     <https://console.groq.com>). When set, the picker generates a vague,
-     spoiler-free AI hint for each daily (the "Show hint summary" button).
-     Without it, auto-picked days simply have no hint — everything else works.
-     Override the model with a `GROQ_MODEL` secret/variable if you like
-     (default `llama-3.3-70b-versatile`; model IDs change — see
-     <https://console.groq.com/docs/models>).
+
+   The picker needs **no Groq key** — it stores puzzles without a hint. The hint
+   is generated lazily by the `hint` Edge Function (see below), so the Groq key
+   lives there instead.
 3. That's it. The workflow [`.github/workflows/daily-puzzle.yml`](.github/workflows/daily-puzzle.yml)
    runs every day **just after local midnight in Amsterdam** (CET/CEST), and you can trigger it by hand from the repo's
    **Actions** tab (**Run workflow**).
@@ -100,18 +97,30 @@ The pool lives in the **`wikis` table** — edit it in the Supabase **Table edit
 - **Add** a wiki: insert a row with the `host` (e.g. `gravityfalls.fandom.com`).
 - **Pause** a wiki: set its `enabled` to `false` (keeps the row for later).
 - **Remove** a wiki: delete the row.
+- **`display_name`** and **`icon`** (optional) drive the fandom picker. `icon` is
+  free text: an **image URL** (rendered as an `<img>`) or an **emoji**. The seed
+  fills it with each community's favicon. Left blank, the client derives the same
+  favicon from the host and shows the stripped host as the name — so a new wiki
+  still gets a name + icon without any extra work.
 
 If the table is empty or unreachable (e.g. a local dry run without the
 service-role key), the picker falls back to a baked-in list in
 `scripts/pick-daily.mjs`. Quality thresholds (length, paragraph count) also live
 at the top of that script.
 
-## Hints for random / custom games (optional Edge Function)
-The **daily** gets its AI hint from the picker (stored in `puzzles.summary`).
-For **Curated / Full random** and **Custom link** games, the hint is generated on
-demand by an Edge Function (`supabase/functions/hint`) so the Groq key stays
-server-side — never in the browser. Until you deploy it, those games simply have
-no hint (nothing breaks).
+## Hints — the Edge Function (recommended)
+Every hint comes from the `hint` Edge Function (`supabase/functions/hint`), which
+keeps the Groq key server-side — never in the browser. Until you deploy it, games
+simply have no hint (nothing breaks).
+
+- **Daily**: the puzzle is stored without a hint. The first player who clicks
+  "Show hint summary" triggers generation; the function **caches** the hint back
+  onto `puzzles.summary` (and uses an atomic claim on `summary_generating_at` so
+  two simultaneous first-clickers don't both call Groq). Everyone else — and any
+  reload — reuses the cached hint. This spreads load across the day and only
+  spends Groq on puzzles people actually open.
+- **Curated / Full random / Custom link**: the hint is generated on demand and
+  not cached (there's no shared puzzle row to cache against).
 
 **Deploy it — via the Supabase CLI:**
 ```
@@ -126,7 +135,10 @@ secrets.
 > `--no-verify-jwt` / "Verify JWT off" makes the function callable with just the
 > publishable key (which the browser already has). It only returns a vague hint,
 > but to limit Groq-quota abuse you could later add rate limiting. The function
-> caps input length and never echoes the answer (same leak filter as the picker).
+> caps input length and never echoes the answer (leak filter mirrored from
+> `scripts/lib/leak-filter.mjs`, the unit-tested reference). It needs no extra
+> secrets for caching: Supabase injects `SUPABASE_URL` and
+> `SUPABASE_SERVICE_ROLE_KEY` into the function automatically.
 
 ## Adding or overriding a puzzle by hand
 You can always pin a specific article — for a themed day, or to override the
