@@ -3,11 +3,14 @@ name: Daily puzzle
 # Picks a fresh random article and stores it as the daily puzzle.
 on:
   schedule:
-    # 23:00 UTC = just after local midnight in Amsterdam year-round
-    # (00:00 CET in winter, 01:00 CEST in summer). GitHub cron is UTC-only and
-    # has no DST, and 23:00 is the earliest time that's still after midnight in
-    # winter — so the picker always runs on the correct local day.
-    - cron: "0 23 * * *"
+    # We want the daily to roll over at LOCAL midnight (Europe/Amsterdam), but
+    # GitHub cron is UTC-only and has no DST. Amsterdam is UTC+1 (CET, winter) or
+    # UTC+2 (CEST, summer), so local midnight is 23:00 UTC in winter and 22:00 UTC
+    # in summer. We schedule BOTH; whichever lands on local 00:00 does the work and
+    # the other is a cheap no-op (the picker computes "today" in Amsterdam time and
+    # exits early when that date's dailies already exist — so it never re-picks).
+    - cron: "0 22 * * *"   # = 00:00 CEST (summer) / 23:00 CET (winter, prior day → no-op)
+    - cron: "0 23 * * *"   # = 00:00 CET  (winter) / 01:00 CEST (summer, already done → no-op)
   workflow_dispatch: {}       # ...and a manual "Run workflow" button
 
 jobs:

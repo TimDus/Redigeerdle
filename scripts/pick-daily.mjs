@@ -239,6 +239,24 @@ async function pickForWiki(wiki, seen, rounds = ATTEMPTS) {
   return null;
 }
 
+// Have we already generated the dailies for this date? The picker is scheduled
+// TWICE (22:00 & 23:00 UTC, straddling the CET/CEST local midnight); the run that
+// fires on the wrong side of midnight would otherwise re-pick and needlessly burn
+// fresh articles from the pool (recordPicked marks them used even though they're
+// never shown). So the second run of a given local day exits early instead.
+async function alreadyPicked(date) {
+  const base = process.env.SUPABASE_URL?.replace(/\/$/, "");
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!base || !key) return false;
+  try {
+    const r = await fetch(base + "/rest/v1/puzzles?select=id&date=eq." + encodeURIComponent(date) + "&limit=1",
+      { headers: { apikey: key, Authorization: "Bearer " + key } });
+    if (!r.ok) return false;
+    const rows = await r.json();
+    return Array.isArray(rows) && rows.length > 0;
+  } catch { return false; }
+}
+
 // Last resort: reuse one of this wiki's earlier dailies so the feed never has a gap.
 // Picks at random among the most recent ones so it isn't always the same repeat.
 async function pastDailyFor(wiki) {
@@ -264,7 +282,12 @@ async function upsert(rows) {
   const base = process.env.SUPABASE_URL?.replace(/\/$/, "");
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!base || !key) throw new Error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set");
-  const r = await fetch(base + "/rest/v1/puzzles", {
+  // Resolve the upsert against the (wiki, date) unique constraint — the real "one
+  // daily per fandom per day" key — not the primary key (id). Without on_conflict,
+  // PostgREST dedups on the id PK, so a row with the same (wiki, date) but a
+  // different id (e.g. a legacy bare-date daily vs the new "<date>:<wiki>" id) slips
+  // past ignore/merge and hard-errors with a 23505 on puzzles_wiki_date_key.
+  const r = await fetch(base + "/rest/v1/puzzles?on_conflict=wiki,date", {
     method: "POST",
     headers: {
       apikey: key, Authorization: "Bearer " + key, "Content-Type": "application/json",
@@ -277,6 +300,12 @@ async function upsert(rows) {
 }
 
 if (isMain) (async () => {
+  // the second scheduled run of the local day (see the two crons in the workflow)
+  // would re-pick and waste pool articles — skip it once today's dailies exist.
+  if (!DRY && !FORCE && await alreadyPicked(DATE)) {
+    console.log(`Dailies for ${DATE} already exist — nothing to do (use --force to re-pick).`);
+    return;
+  }
   if (!DRY) {
     const pruned = await prunePicked();
     if (pruned) console.log(`Released ${pruned} pick(s) older than ${EXPIRE_DAYS} days.`);
