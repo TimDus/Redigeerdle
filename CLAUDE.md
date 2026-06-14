@@ -41,6 +41,16 @@ a standalone Node script run by GitHub Actions.
   free/stale`); the loser gets `status:"pending"` and the client polls. Random/custom
   games call the same function with no `puzzleId` → generate, no cache. The bundled
   [puzzle.json](puzzle.json) fallback keeps a baked-in summary for offline play.
+  **Anti-poisoning**: the cached daily path does **not** trust the caller-supplied
+  `title` (anyone could POST a real `puzzleId` with a bogus title to pollute the shared
+  `summary` — the answer is never stored, so it can't be validated against the row).
+  Instead, the *generating* caller re-derives the real title from the puzzle's pinned
+  `wiki`+`revision_id` via MediaWiki (`fetchTitleAtRevision`) and generates from that,
+  falling back to the supplied title only if the fetch fails. The function also requires
+  a **valid Supabase session** (a silent anonymous guest counts) so it isn't an open,
+  unauthenticated Groq proxy — it's deployed `--no-verify-jwt` and checks the JWT in code
+  (skipped only when there's no service key to validate with). (Rate-limiting is still a
+  deploy-level concern — Supabase's anon-signin limit + a Groq dashboard cap.)
 - The leak filter (reject an AI hint that contains a title word) lives in
   [scripts/lib/leak-filter.mjs](scripts/lib/leak-filter.mjs) (the unit-tested reference)
   and is **mirrored** in the `hint` Edge Function
@@ -69,6 +79,14 @@ behind the open modal, so a bad/malformed link used to look like a silent no-op.
 which `setUrlMsg(msg, true)` renders in red right under the input. **On mobile** `setUrlMsg`
 also `scrollIntoView`s the error (the scrollable modal can push it below the fold), so the
 user immediately sees something went wrong — gated by `matchMedia("(max-width:640px)")`.
+
+**Because the source wiki is untrusted** (any MediaWiki), its API-returned title, host,
+revision url and `rightsinfo` license name/url are **attacker-controlled on a custom or
+shared `?wiki=&rev=` link**. So none of it is ever put into the DOM via `innerHTML`:
+`attribution()` builds the source line with `createElement`/`textContent`, and any url that
+becomes an `href` goes through `safeHttpUrl()` (only `http(s):` — no `javascript:`/`data:`).
+The article body is already safe (parsed with `DOMParser`, which doesn't run scripts, and
+emitted as `textContent` tokens). Keep new wiki-derived text out of `innerHTML`.
 
 ## Key files
 
@@ -163,15 +181,20 @@ the header.
   fallback" paths.
 - [tests/supabase.spec.mjs](tests/supabase.spec.mjs) — Supabase happy paths. Mocks
   **POPULATED** REST responses so `loadPuzzle` (Supabase branch), `loadDailyMetrics`
-  (the `daily_metrics` RPC aggregate + scores row rendering — the **"Daily metrics"**
-  modal, formerly "Leaderboard"; DOM ids are `#metricsBtn`/`#metricsmodal`/`#metricsList`),
+  (the `daily_metrics` RPC anonymous aggregate **only** — the **"Daily metrics"** modal,
+  formerly "Leaderboard"; the per-player ranked list from `scores` has been removed, so
+  the modal shows just the aggregate stat cards; DOM ids are
+  `#metricsBtn`/`#metricsmodal`/`#metricsList`),
   `submitScore` (payload + best-score logic) and `recordPlay` (the `plays`
   log: finished-game payload + an in-progress/unfinished row) run for real. The Supabase
   client is real but every `**/rest/v1/**` call is intercepted; auth is faked by
   assigning `currentUser` via `page.evaluate` (no real login). `routeRest` swallows
   `**/rest/v1/plays**` so the per-guess `recordPlay` upserts stay hermetic; the
   `recordPlay` tests override that route to capture the payload (and poll for the **final
-  `solved`** upsert, since one fires per guess).
+  `solved`** upsert, since one fires per guess). Two **replay-blocking** tests also live
+  here: a same-session re-open of a solved daily stays locked, and a **cross-device**
+  re-open re-locks from the server (`plays` GET → a finished row) **without** pushing a
+  0-guess clobber (asserts no `plays` POST fires — the `serverFinished` guard).
 - [tests/picker.spec.mjs](tests/picker.spec.mjs) — pure-function unit tests for the
   picker. Imports the exported helpers; no browser, no network.
 
@@ -182,7 +205,18 @@ in the request URL or the method.
 
 ## Daily-feed follows (Settings)
 
-The header **Settings** button opens a modal with **two** sections:
+The header **Settings** button opens a modal with a **Profile** section (real accounts
+only) plus **Preferences** and **Daily feed**:
+
+**Profile** (`#profileSec`, `hidden` unless `isRealUser()`) — a display-name editor:
+`#displayNameInput` + `#saveNameBtn`. `saveDisplayName()` writes `profiles.username`
+(`update … eq(id)`, own-row RLS, 24-char cap), surfaces a `#nameMsg` status (`.ok`/`.err`),
+and on success updates `currentProfile` + calls `renderAuth()` to refresh the "Signed in
+as …" label. `username` is **`text unique`**, so a clash returns Postgres `23505` →
+"That name is taken." Guests have no profile row, so the section is hidden for them
+(`syncProfileControls()`, called by `syncPrefControls()` and again from `onAuth` if the
+modal is open so it appears/disappears on sign-in/out). No migration — `profiles` and its
+update policy already exist.
 
 **Preferences** (device-local prefs, all in `localStorage`):
 - **Dark mode** (`#darkToggle` → `setTheme()`, `redigeerdle:theme`). The palette is a set
@@ -309,7 +343,13 @@ Settings → How to play**. `.feed-actions` is `display:none` by default (deskto
 the header) and `display:flex` only `≤640px`; it's `flex:0 0 auto` so it pins below the
 scrollable `.feed-cards`. Each handler **closes the drawer then calls the same action** as
 the header button (`openMenu()` / `openSettings()` / open `#helpmodal`). This is the mobile
-entry point for dark-mode / homepage-daily / follows (all inside Settings).
+entry point for dark-mode / homepage-daily / follows (all inside Settings). Because Settings
+is only reachable from the (now-closed) drawer here, **`closeSettings()` reopens the feed
+drawer on mobile** (`mqMobile.matches` → `openFeed()`, which renders), so a freshly-followed
+fandom shows in the feed immediately instead of only after the drawer is reopened by hand;
+desktop keeps the old behaviour (`renderFeed()` only, since the drawer may already be open
+behind Settings). `openFeed()` is the shared open-the-drawer-and-render helper (the
+`#feedBtn` toggle and `closeSettings` both call it).
 
 **Mobile auto-hide header (done).** On mobile the top bar **hides while scrolling down and
 reappears while scrolling up** (the usual mobile pattern), instead of staying pinned. The
@@ -380,6 +420,25 @@ close; if a wiki still misses a day the feed shows "—" for it and it retries n
 
 - **Daily progress / state** is keyed by **puzzle id** (`stateKey(dailyPuzzleId)`), not
   date — fandoms share a date, so date-keying would collide.
+- **Replay-blocking is two-layered.** Same device: `restoreDailyState` replays the
+  `localStorage` state and re-locks a solved/given-up daily. But that state is
+  **device-local**, so a real signed-in user on another device (or after clearing
+  storage, or a now-merged guest) had no local block — the merge moves `plays` to the
+  account but nothing consulted the server. So when there's **no usable local state**,
+  `restoreDailyState` calls **`restoreFinishedFromServer()`**: for a **real** signed-in
+  user it queries the owner-only `plays` log for a finished (`solved` OR `gave_up`) row
+  with `play_id = dailyPuzzleId` and, if found, calls **`showFinishedDaily()`** to reveal
+  + lock the board (banner: "you already completed/gave up on this daily") and drops a
+  **minimal local marker** (`guesses:[]` + the outcome) so the next load needs no server
+  round-trip. Because that reconstructed end-state has **no real guess list**, it sets a
+  module-level **`serverFinished`** flag that **short-circuits `recordPlay` and
+  `submitScore`** — otherwise the 0-guess snapshot would clobber the authoritative
+  server row / push a bogus leaderboard entry. `restoreDailyState` is now **async**
+  (`loadPuzzlePointer` awaits it). Guests get no server re-lock (a fresh device = a new
+  anon id with no matching `plays`); that's fine — the merge is a real-account feature.
+  (Known minor gap, out of scope: a featured daily solved **as a guest** then opened on
+  a new device isn't back-filled into `scores` — guests never scored, and the
+  reconstruction has no guess count to submit.)
 - **Scoring**: only the **featured** daily is scored for now (`submitScore` guards on
   `dailyFeatured`); per-fandom feed dailies are playable + shareable but not yet on a
   leaderboard. Per-fandom leaderboards (repointing `scores` to `(user, wiki, date)`) are
@@ -442,8 +501,13 @@ solves that and also records `wiki` on every row, so later **per-fandom aggregat
 - **`started_at`/`duration_seconds`** use `gameStartedAt` (set in `initGame`), which is
   **persisted in the daily localStorage state** (`startedAt`) and restored by
   `restoreDailyState`, so a same-day resume reports an honest duration. It's wall-clock
-  (includes idle/away time). Cadence is **one upsert per guess** (chosen tradeoff);
-  debounce if write volume ever matters.
+  (includes idle/away time). **The clock freezes at the finish**: `checkWin`/`giveUp`
+  stamp `gameFinishedAt` (also persisted as `finishedAt` and restored before `checkWin`
+  re-runs on resume), and `recordPlay` computes `duration_seconds` as
+  `(gameFinishedAt || Date.now()) - gameStartedAt` — so a solved/given-up daily reopened
+  later in the day (or a post-finish Summary/Source click → `saveDailyState` →
+  `recordPlay`) does **not** keep the duration ticking past the solve moment. Cadence is
+  **one upsert per guess** (chosen tradeoff); debounce if write volume ever matters.
 
 ## My stats (personal aggregate over `plays`)
 

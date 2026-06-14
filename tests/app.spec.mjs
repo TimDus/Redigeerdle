@@ -344,12 +344,14 @@ test("layout: the two-column play area is the default (article | controls grid)"
   await expect(page.locator("#playarea")).toHaveCSS("display", "grid");
   // and the controls column is the sticky right-hand cell
   await expect(page.locator("#controlcol")).toHaveCSS("position", "sticky");
-  // Settings has two sections: Preferences (dark mode / jump-to-word) and Daily feed
+  // Settings has two visible sections here: Preferences (dark mode / jump-to-word) and
+  // Daily feed. (The Profile section is hidden when not signed in as a real account.)
   await page.click("#settingsBtn");
-  const headers = page.locator("#settingsmodal .settings-h");
+  const headers = page.locator("#settingsmodal .settings-h:visible");
   await expect(headers).toHaveCount(2);
   await expect(headers.nth(0)).toHaveText("Preferences");
   await expect(headers.nth(1)).toHaveText("Daily feed");
+  await expect(page.locator("#profileSec")).toBeHidden();
 });
 
 test("layout: collapses to a single column on a narrow viewport", async ({ page }) => {

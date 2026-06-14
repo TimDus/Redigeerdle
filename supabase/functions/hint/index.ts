@@ -45,6 +45,32 @@ function adminClient() {
   return url && key ? createClient(url, key) : null;
 }
 
+// Re-derive a daily's REAL title from its pinned revision (wiki + revision_id), reading
+// it straight from MediaWiki. The answer is never stored server-side, so for the cached
+// daily path we read it authoritatively here instead of trusting the caller's `title` —
+// otherwise anyone could POST a real puzzleId with a bogus title/excerpt and poison the
+// shared `puzzles.summary` for every player. Returns null if it can't be fetched (we then
+// fall back to the caller's title, so the feature still degrades gracefully).
+async function fetchTitleAtRevision(wiki: string, revisionId: number | string): Promise<string | null> {
+  if (!wiki || !revisionId) return null;
+  const host = String(wiki).replace(/^https?:\/\//, "");
+  const slash = host.indexOf("/");
+  const root = "https://" + (slash >= 0 ? host.slice(0, slash) : host);
+  const withPath = "https://" + host;                       // keeps a Fandom /<lang> prefix
+  const cands = [...new Set([withPath + "/api.php", root + "/w/api.php", root + "/api.php"])];
+  for (const base of cands) {
+    try {
+      const r = await fetch(base + "?action=query&revids=" + encodeURIComponent(String(revisionId)) + "&formatversion=2&format=json");
+      if (!r.ok || !((r.headers.get("content-type") || "").includes("json"))) continue;
+      const j = await r.json();
+      const pages = j?.query?.pages;
+      const t = Array.isArray(pages) ? pages[0]?.title : (pages && Object.values(pages)[0]?.title);
+      if (t) return String(t);
+    } catch { /* try the next candidate endpoint */ }
+  }
+  return null;
+}
+
 // Ask Groq for a vague, spoiler-free hint. Returns "" on any failure, a leak, or
 // an out-of-bounds length. Keep this leak filter in sync with leaksTitle in
 // scripts/lib/leak-filter.mjs (the unit-tested reference).
@@ -90,6 +116,18 @@ Deno.serve(async (req) => {
 
     const admin = adminClient();
 
+    // Require a valid Supabase session (a silent anonymous guest counts) so this
+    // Groq-backed endpoint isn't an open, unauthenticated proxy that any script can hit
+    // to burn the server-side Groq quota. supabase-js attaches the caller's JWT
+    // automatically; we deploy with --no-verify-jwt and check it here so the no-DB
+    // degrade path still works. Skipped only when we have no service key to validate with.
+    if (admin) {
+      const authHeader = req.headers.get("Authorization") || "";
+      const jwt = authHeader.replace(/^Bearer\s+/i, "").trim();
+      const { data: who } = jwt ? await admin.auth.getUser(jwt) : { data: null };
+      if (!who?.user) return json({ summary: "", status: "ready" });
+    }
+
     // ---- random/custom games: no row to cache against, just generate ----
     if (!puzzleId || !admin) {
       return json({ summary: await generate(title, text), status: "ready" });
@@ -97,8 +135,9 @@ Deno.serve(async (req) => {
 
     // ---- daily: generate once and cache, race-safe via an atomic claim ----
     try {
-      // 1) already cached? return it without touching Groq.
-      const { data: row } = await admin.from("puzzles").select("summary").eq("id", puzzleId).maybeSingle();
+      // 1) already cached? return it without touching Groq. (Also read the pinned
+      //    revision so the generating caller can re-derive the real title — see step 3.)
+      const { data: row } = await admin.from("puzzles").select("summary, wiki, revision_id").eq("id", puzzleId).maybeSingle();
       if (row?.summary) return json({ summary: row.summary, status: "ready" });
 
       // 2) atomically claim: succeeds for exactly one caller. Under READ COMMITTED
@@ -120,8 +159,11 @@ Deno.serve(async (req) => {
         return json({ summary: "", status: "pending" });
       }
 
-      // 3) we own the claim → generate and write back.
-      const hint = await generate(title, text);
+      // 3) we own the claim → generate and write back. Re-derive the title from the
+      //    pinned revision so a caller-supplied (possibly poisoned) title can't pollute
+      //    the shared cache; fall back to the supplied title only if the fetch fails.
+      const authTitle = await fetchTitleAtRevision(row?.wiki, row?.revision_id);
+      const hint = await generate(authTitle || title, text);
       if (hint) {
         await admin.from("puzzles").update({ summary: hint }).eq("id", puzzleId);
         return json({ summary: hint, status: "ready" });

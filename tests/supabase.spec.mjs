@@ -50,39 +50,25 @@ test("loads the daily from Supabase (not the bundled fallback)", async ({ page }
   expect(await page.locator("#body .red").count()).toBeGreaterThan(20);
 });
 
-test("daily metrics render the aggregate stats + ranked rows from scores (sorting display + reveals + name fallback)", async ({ page }) => {
+test("daily metrics render the anonymous aggregate stats (no per-player leaderboard)", async ({ page }) => {
   await routeRest(page);
   await routeDaily(page);
-  // the ranked-list query embeds profiles(username); return three pre-sorted rows
-  await page.route("**/rest/v1/scores**", r =>
-    r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([
-      { guesses: 3, reveals: 0, user_id: "u1", profiles: { username: "Alice" } },
-      { guesses: 5, reveals: 2, user_id: "u2", profiles: { username: "Bob" } },
-      { guesses: 7, reveals: 0, user_id: "u3", profiles: { username: null } },  // → "player"
-    ]) }));
   await page.goto("/");
   await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
   await page.click("#metricsBtn");
   await expect(page.locator("#metricsmodal")).toHaveClass(/open/);
   await expect(page.locator("#metricsTitle")).toContainText("2026-06-10");
 
-  // aggregate stat cards from the daily_metrics RPC (completion %, avg guesses, avg time)
+  // aggregate stat cards from the daily_metrics RPC (players, completion %, avg guesses, avg time)
   const cards = page.locator("#metricsStats .stat");
-  await expect(cards).toHaveCount(3);
-  await expect(cards.nth(0)).toContainText("75%");
-  await expect(cards.nth(1)).toContainText("12.5");
-  await expect(cards.nth(2)).toContainText("2m 14s");   // 134s → 2m 14s
+  await expect(cards).toHaveCount(4);
+  await expect(cards.nth(0)).toContainText("8");        // players
+  await expect(cards.nth(1)).toContainText("75%");      // completion
+  await expect(cards.nth(2)).toContainText("12.5");     // avg guesses
+  await expect(cards.nth(3)).toContainText("2m 14s");   // 134s → 2m 14s
 
-  const rows = page.locator("#metricsList .mrow");
-  await expect(rows).toHaveCount(3);
-  // rank 1: Alice, 3 guesses (no reveals → bare number)
-  await expect(rows.nth(0).locator(".rank")).toHaveText("1");
-  await expect(rows.nth(0).locator(".nm")).toHaveText("Alice");
-  await expect(rows.nth(0).locator(".sc")).toHaveText("3");
-  // rank 2: Bob, reveals shown as "5 (2r)"
-  await expect(rows.nth(1).locator(".sc")).toHaveText("5 (2r)");
-  // rank 3: null username falls back to "player"
-  await expect(rows.nth(2).locator(".nm")).toHaveText("player");
+  // the per-player ranked leaderboard is gone — only the anonymous aggregate remains
+  await expect(page.locator("#metricsList .mrow")).toHaveCount(0);
 });
 
 test("submitScore posts the right payload when a signed-in user solves the daily", async ({ page }) => {
@@ -347,6 +333,60 @@ test("maybeMergeAnon is a no-op when the saved guest id equals the current user"
   await page.waitForTimeout(300);
   expect(invoked).toBe(false);                                   // nothing to merge into itself
   expect(await page.evaluate(() => localStorage.getItem("redigeerdle:anonmerge"))).toBeNull();  // still cleared
+});
+
+// ---- replay-blocking: a finished daily can't be replayed for stats ----
+
+test("re-opening a solved daily in the same session keeps it locked (no replay)", async ({ page }) => {
+  await routeRest(page);
+  await routeDaily(page);
+  await page.route("**/rest/v1/scores**", r =>      // keep submitScore quiet
+    r.fulfill({ status: 200, contentType: "application/json", body: "[]" }));
+  await page.goto("/");
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+
+  // anonymous guest solves the daily → solved state persists to localStorage
+  await page.evaluate(() => { currentUser = { id: "guest-id", is_anonymous: true }; });
+  await page.fill("#guess", "golden"); await page.press("#guess", "Enter");
+  await page.fill("#guess", "snitch"); await page.press("#guess", "Enter");
+  await expect(page.locator("#win")).toHaveClass(/show/);
+
+  // "sign in" (swap to a real account) and re-open the daily WITHOUT a page reload,
+  // exactly as the home button / feed would — it must restore as solved, not replayable.
+  await page.evaluate(() => { currentUser = { id: "real-id", is_anonymous: false }; });
+  await page.evaluate(async () => { await loadPuzzle(); });
+  await expect(page.locator("#guess")).toBeDisabled();
+  await expect(page.locator("#win")).toHaveClass(/show/);
+});
+
+test("a daily already finished on the server re-locks for a signed-in user with no local state", async ({ page }) => {
+  await routeRest(page);
+  await routeDaily(page);
+  await page.route("**/rest/v1/scores**", r =>
+    r.fulfill({ status: 200, contentType: "application/json", body: "[]" }));
+  let playPost = null;
+  await page.route("**/rest/v1/plays**", r => {     // overrides routeRest's plays stub
+    if (r.request().method() === "GET")             // restoreFinishedFromServer's lookup → a solved row
+      return r.fulfill({ status: 200, contentType: "application/json",
+        body: JSON.stringify([{ solved: true, gave_up: false }]) });
+    playPost = JSON.parse(r.request().postData() || "{}");   // any upsert here = a clobber of the real row
+    return r.fulfill({ status: 201, contentType: "application/json", body: "[]" });
+  });
+  await page.goto("/");
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+
+  // real signed-in user on a fresh device: no local daily state, but the server has
+  // a solved play (e.g. solved on another device, or as a now-merged guest)
+  await page.evaluate(() => { currentUser = { id: "real-id", is_anonymous: false }; localStorage.clear(); });
+  await page.evaluate(async () => { await loadPuzzle(); });
+
+  // re-locked from the server → can't be replayed
+  await expect(page.locator("#guess")).toBeDisabled();
+  await expect(page.locator("#win")).toHaveClass(/show/);
+  await expect(page.locator("#winText")).toContainText("already completed");
+  // and we did NOT push a reconstructed 0-guess row over the authoritative server row
+  await page.waitForTimeout(300);
+  expect(playPost).toBeNull();
 });
 
 // a daily WITHOUT a stored summary — the picker no longer bakes one in

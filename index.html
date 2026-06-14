@@ -299,6 +299,11 @@
   .home-daily-sel { font-family:var(--mono); font-size:.8rem; padding:5px 8px; border:1px solid var(--line); background:var(--surface); color:var(--ink); max-width:62%; cursor:pointer; }
   .home-daily-sel:focus { outline:2px solid var(--marker); outline-offset:-1px; }
   .settings-divider { border-top:1px solid var(--line); margin:18px 0 14px; }
+  /* profile: display-name editor */
+  .dn-actions { display:flex; align-items:center; gap:10px; }
+  .dn-actions .msg { font-family:var(--mono); font-size:.72rem; color:var(--muted); min-height:1em; }
+  .dn-actions .msg.err { color:var(--classified); }
+  .dn-actions .msg.ok { color:#3aa657; }
   .followlist { max-height:46vh; overflow-y:auto; display:flex; flex-direction:column; border:1px solid var(--line); background:var(--surface); }
   .followrow { display:flex; align-items:center; gap:9px; font-family:var(--mono); font-size:.82rem; padding:7px 10px; border-bottom:1px dotted var(--line); cursor:pointer; }
   .followrow:last-child { border-bottom:0; }
@@ -350,10 +355,6 @@
   .metrics-stats .stat .k { font-size:.62rem; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin-top:2px; }
   .metrics-stats .empty { color:var(--muted); font-size:.8rem; }
   #metricsList { font-family:var(--mono); font-size:.8rem; }
-  #metricsList .mrow { display:flex; justify-content:space-between; gap:10px; padding:4px 0; border-bottom:1px dotted var(--line); }
-  #metricsList .mrow.me { color:var(--classified); font-weight:700; }
-  #metricsList .mrow .rank { width:2.2em; color:var(--muted); }
-  #metricsList .mrow .nm { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #metricsList .empty { color:var(--muted); }
 
   /* personal stats (rendered inside the #statsmodal popup) */
@@ -459,6 +460,16 @@
     <div class="modal-card" role="dialog" aria-modal="true" aria-label="Settings">
       <button class="modal-x" id="settingsClose" aria-label="Close">&times;</button>
       <h2 class="modal-title">Settings</h2>
+      <div class="profile-sec" id="profileSec" hidden>
+        <div class="settings-h">Profile</div>
+        <div class="opt-d">Your display name on the leaderboard and in “Signed in as”.</div>
+        <input id="displayNameInput" class="follow-search" type="text" maxlength="24" placeholder="display name" autocomplete="off">
+        <div class="dn-actions">
+          <button id="saveNameBtn">Save</button>
+          <span class="msg" id="nameMsg"></span>
+        </div>
+        <div class="settings-divider"></div>
+      </div>
       <div class="settings-h">Preferences</div>
       <label class="setrow"><input type="checkbox" id="darkToggle"><span>Dark mode</span></label>
       <label class="setrow"><input type="checkbox" id="scrollToggle"><span>Jump to a word when you guess it</span></label>
@@ -612,7 +623,13 @@ who whom whose what when where why how all any some more most such into over und
 after before between during without within up down out off`.split(/\s+/));
 
 let guesses, guessed, tokens, titleKeyWords, titleKeySet, titleStemSet, titleToks, bodyBlocks, META, hintsLeft, summaryText, revealArmed, solved, summaryUsed, fandomUsed, gaveUp;
+// true when the current daily was restored as *already finished* from the server
+// (solved/gave up on another device, or as a now-merged guest) with no local guess
+// list — suppresses recordPlay/submitScore so we never clobber the real server row
+// with this reconstructed 0-guess state.
+let serverFinished = false;
 let gameStartedAt = 0;   // ms epoch when the current article first loaded (for play-log duration; persisted across daily resumes)
+let gameFinishedAt = 0;  // ms epoch when the game was solved/given up — freezes the play-log duration so it stops ticking after the finish (persisted across daily resumes)
 let currentPlayId = null;   // stable per-play key the `plays` upsert dedupes on (daily → puzzle_id; random/custom → minted id)
 const mintPlayId = () => (window.crypto && crypto.randomUUID)
   ? crypto.randomUUID()
@@ -763,25 +780,54 @@ function refreshMeta() {
     row.className = "row" + (g.hint ? " hintrow" : (g.hits ? "" : " zero")) + (g.hits ? " nav" : "");
     if (g.hits) { row.dataset.key = norm(g.word); row.title = "Click to jump to this word in the text"; }
     const label = g.hint ? g.word + " (revealed)" : g.word;
-    row.innerHTML = "<span>"+label+"</span><span class='n "+(g.hits?"hit":"")+"'>"+g.hits+"</span>";
+    // textContent, not innerHTML — g.word is raw player input (and a restored guess list)
+    const wordSpan = document.createElement("span"); wordSpan.textContent = label;
+    const nSpan = document.createElement("span"); nSpan.className = "n" + (g.hits ? " hit" : ""); nSpan.textContent = g.hits;
+    row.append(wordSpan, nSpan);
     h.appendChild(row);
   });
 }
 
+// only http(s) urls are safe to put in an href — a custom/shared link can point at
+// ANY MediaWiki, so its rightsinfo url / revision url is attacker-controlled and could
+// be a javascript:/data: scheme. Returns the normalised url or "" if not http(s).
+function safeHttpUrl(u) {
+  try { const p = new URL(u); return /^https?:$/.test(p.protocol) ? p.href : ""; }
+  catch { return ""; }
+}
+
 function attribution(solved) {
   const f = document.getElementById("attribution");
+  // Build with DOM nodes / textContent — never innerHTML. The license name, title and
+  // wiki host all come from the (possibly attacker-controlled) wiki API, so string
+  // interpolation into innerHTML was a DOM-XSS sink on custom/shared links.
+  f.textContent = "";
   const lic = META.license || { name:"Unknown", url:"" };
-  const licLink = lic.url ? `<a href="${lic.url}" target="_blank" rel="noopener">${lic.name}</a>` : lic.name;
   if (solved) {
     const src = META.source || {};
-    const titleLink = src.revision_url
-      ? `<a href="${src.revision_url}" target="_blank" rel="noopener">${META.title}</a>`
-      : META.title;
-    f.innerHTML = `Source: ${titleLink} — ${src.wiki || ""}. ${META.adapted_note || ""} License: ${licLink}.`;
+    f.appendChild(document.createTextNode("Source: "));
+    const safeRev = safeHttpUrl(src.revision_url);
+    if (safeRev) {
+      const a = document.createElement("a");
+      a.href = safeRev; a.target = "_blank"; a.rel = "noopener"; a.textContent = META.title;
+      f.appendChild(a);
+    } else {
+      f.appendChild(document.createTextNode(META.title));
+    }
+    f.appendChild(document.createTextNode(" — " + (src.wiki || "") + ". " + (META.adapted_note || "") + " License: "));
+    const safeLic = safeHttpUrl(lic.url);
+    if (safeLic) {
+      const a = document.createElement("a");
+      a.href = safeLic; a.target = "_blank"; a.rel = "noopener"; a.textContent = lic.name || "See wiki";
+      f.appendChild(a);
+    } else {
+      f.appendChild(document.createTextNode(lic.name || "Unknown"));
+    }
+    f.appendChild(document.createTextNode("."));
   } else {
     // hide the wiki/title until solved — naming the fandom would give the puzzle away
     // (that's exactly what the paid "Reveal fandom" hint is for). License name only (no link).
-    f.innerHTML = `Source: a redacted Fandom article (license: ${lic.name}). `
+    f.textContent = `Source: a redacted Fandom article (license: ${lic.name || "Unknown"}). `
       + `Full attribution — title and wiki — appears after you finish.`;
   }
 }
@@ -797,6 +843,7 @@ function lockGame() {
 function checkWin() {
   if (titleKeyWords.length && titleKeyWords.every(t => t.revealed)) {
     solved = true;
+    if (!gameFinishedAt) gameFinishedAt = Date.now();   // freeze the duration at the solve moment (don't keep ticking on resume/summary/source)
     // reveal the whole article (and title) now that the game is over
     tokens.forEach(t => t.revealed = true);
     draw();
@@ -819,6 +866,7 @@ function checkWin() {
 function giveUp() {
   if (solved || gaveUp) return;
   gaveUp = true;
+  if (!gameFinishedAt) gameFinishedAt = Date.now();   // freeze the duration at the give-up moment
   tokens.forEach(t => t.revealed = true);
   draw();
   document.getElementById("winHead").textContent = "GAVE UP";
@@ -976,8 +1024,8 @@ function showFandom() {
 function initGame(title, blocks, meta) {
   META = { ...meta, title };
   summaryText = meta.summary || "";
-  guesses = []; guessed = new Set(); tokens = []; hintsLeft = 3; revealArmed = false; solved = false; summaryUsed = false; fandomUsed = false; gaveUp = false;
-  gameStartedAt = Date.now();   // reset the clock; a daily resume overrides this with the saved start (restoreDailyState)
+  guesses = []; guessed = new Set(); tokens = []; hintsLeft = 3; revealArmed = false; solved = false; summaryUsed = false; fandomUsed = false; gaveUp = false; serverFinished = false;
+  gameStartedAt = Date.now(); gameFinishedAt = 0;   // reset the clock; a daily resume overrides these with the saved start/finish (restoreDailyState)
   wordNav = new Map(); currentNavKey = null;   // reset history-navigation cursors for the new article
   titleToks = tokenize(title, "title");
   bodyBlocks = blocks.map(b => ({ tag: b.tag, toks: tokenize(b.text, "body") }));
@@ -1592,6 +1640,42 @@ function loadPrefs() {
 function syncPrefControls() {
   document.getElementById("darkToggle").checked = isDark();
   document.getElementById("scrollToggle").checked = prefAutoScroll;
+  syncProfileControls();
+}
+// the display-name editor is only for real accounts (guests have no profile row)
+function syncProfileControls() {
+  const sec = document.getElementById("profileSec");
+  const real = isRealUser();
+  sec.hidden = !real;
+  if (real) {
+    document.getElementById("displayNameInput").value = (currentProfile && currentProfile.username) || "";
+    nameMsg("");
+  }
+}
+function nameMsg(text, cls) {
+  const m = document.getElementById("nameMsg");
+  m.textContent = text || ""; m.className = "msg" + (cls ? " " + cls : "");
+}
+// save the player's display name into profiles.username (own-row RLS).
+async function saveDisplayName() {
+  if (!isRealUser()) return;
+  const input = document.getElementById("displayNameInput");
+  const name = input.value.trim().slice(0, 24);
+  if (!name) { nameMsg("Enter a name.", "err"); return; }
+  if (currentProfile && name === currentProfile.username) { nameMsg("That's already your name.", "err"); return; }
+  const btn = document.getElementById("saveNameBtn");
+  btn.disabled = true; nameMsg("Saving…");
+  const { data, error } = await supa.from("profiles")
+    .update({ username: name }).eq("id", currentUser.id).select().maybeSingle();
+  btn.disabled = false;
+  if (error) {
+    // username is UNIQUE — a clash comes back as a 23505 conflict
+    nameMsg(error.code === "23505" ? "That name is taken." : "Couldn't save — try again.", "err");
+    return;
+  }
+  currentProfile = data || { ...(currentProfile || { id: currentUser.id }), username: name };
+  nameMsg("Saved.", "ok");
+  renderAuth();   // refresh the "Signed in as <name>" label
 }
 
 /* ---- settings: preferences + the daily-feed fandom follows ---- */
@@ -1602,16 +1686,25 @@ async function openSettings() {
 }
 function closeSettings() {
   document.getElementById("settingsmodal").classList.remove("open");
-  renderFeed();   // follows may have changed
+  // On mobile Settings is only reachable from the (now-closed) feed drawer, so reopening
+  // it returns the player there with the follow changes already rendered — otherwise the
+  // feed wouldn't reflect a freshly-followed fandom until the drawer was reopened by hand.
+  if (mqMobile.matches) openFeed();
+  else renderFeed();   // desktop: drawer may be open behind Settings → follows may have changed
 }
+// same overlapping-render guard as renderFeed (see feedRenderSeq): the awaits below let
+// a second call interleave and double the rows. Bump a token, fetch, then bail if stale.
+let followListSeq = 0;
 async function renderFollowList() {
   document.getElementById("settingsNote").textContent = isRealUser()
     ? "Signed in — saved to your account."
     : "Not signed in — saved on this device.";
+  const seq = ++followListSeq;
   const list = document.getElementById("followList");
   list.innerHTML = "<div class='empty'>Loading…</div>";
   const rows = await getWikiList();
   await loadFollows();
+  if (seq !== followListSeq) return;   // a newer render started → don't clobber/duplicate
   populateHomeDailySelect(rows);
   list.innerHTML = "";
   rows.forEach(w => {
@@ -1697,10 +1790,18 @@ function filterFeedCards() {
   if (none) none.hidden = shown > 0;
 }
 
+// guards against overlapping renders: renderFeed is async (network awaits), and many
+// paths fire it (openFeed, feed-card .then, loadPuzzle, onAuth, closeSettings→openFeed).
+// Two overlapping calls used to BOTH clear #feedCards and BOTH append → every card shown
+// twice. We bump a generation token at entry, fetch everything, then bail if a newer
+// render has started (or the drawer closed) BEFORE touching the DOM — so all DOM mutation
+// is one atomic synchronous block that only the latest render runs.
+let feedRenderSeq = 0;
 async function renderFeed() {
   // the feed is a dropdown — only do the work (DB queries included) when it's open.
   // #feedBtn re-renders on open, so nothing is lost by skipping it while closed.
   if (!document.getElementById("feed").classList.contains("open")) return;
+  const seq = ++feedRenderSeq;
   const cards = document.getElementById("feedCards");
   const search = document.getElementById("feedSearch");
   if (!supa) {                                       // the feed needs the puzzles table
@@ -1708,16 +1809,29 @@ async function renderFeed() {
     cards.innerHTML = "<div class='feed-empty'>The daily feed needs Supabase configured.</div>";
     return;
   }
+  // ---- fetch phase: everything that awaits happens up front, no DOM writes yet ----
   await loadFollows();
   const list = await getWikiList();
   const byHost = new Map(list.map(w => [w.host, w]));
   const followed = [...follows].filter(h => byHost.has(h));   // only known/enabled wikis
+  const featured = await latestPointer({ featured: true });   // null → just skip the pinned card
+  // today's dailies for the followed fandoms (below the pinned general daily)
+  let puzzles = [];
+  if (followed.length) {
+    try {
+      const { data } = await supa.from("puzzles").select("*").eq("date", todayLocal()).in("wiki", followed);
+      puzzles = data || [];
+    } catch { puzzles = []; }
+  }
+
+  // ---- render phase: stale (a newer render started) or drawer closed → bail before
+  // touching the DOM. Everything below is synchronous, so no other render can interleave. ----
+  if (seq !== feedRenderSeq || !document.getElementById("feed").classList.contains("open")) return;
   cards.innerHTML = "";
 
   // pinned top card: the featured "general" daily — ALWAYS first, regardless of follows.
   // It must NOT reveal its fandom (the fandom is itself a paid hint), so it shows a
   // neutral label/icon rather than the underlying wiki's name/favicon.
-  const featured = await latestPointer({ featured: true });   // null → just skip the pinned card
   if (featured) {
     const card = document.createElement("button");
     card.className = "feedcard pinned";
@@ -1737,14 +1851,6 @@ async function renderFeed() {
     cards.appendChild(card);
   }
 
-  // today's dailies for the followed fandoms (below the pinned general daily)
-  let puzzles = [];
-  if (followed.length) {
-    try {
-      const { data } = await supa.from("puzzles").select("*").eq("date", todayLocal()).in("wiki", followed);
-      puzzles = data || [];
-    } catch { puzzles = []; }
-  }
   const byWiki = new Map(puzzles.map(p => [p.wiki, p]));
   search.hidden = followed.length < 2;     // a filter only helps once there are a few
   followed.forEach(host => {
@@ -1812,7 +1918,7 @@ async function loadPuzzlePointer(p, { revealFandom = false } = {}) {
       // featured unless the row explicitly says otherwise (home daily / puzzle.json have no flag)
       featured: p.is_featured !== false,
       statusMsg });
-  restoreDailyState();
+  await restoreDailyState();
   if (revealFandom) showFandom();   // reveal after restore so saveDailyState can't clobber progress
 }
 
@@ -1831,22 +1937,51 @@ function saveDailyState() {
       v: 1, id: dailyPuzzleId,
       guesses: guesses.map(g => ({ word: g.word, hits: g.hits, hint: !!g.hint })),
       hintsLeft, solved: !!solved, summaryUsed: !!summaryUsed, fandomUsed: !!fandomUsed, gaveUp: !!gaveUp,
-      startedAt: gameStartedAt || null   // keep the original start so a same-day resume reports honest duration
+      startedAt: gameStartedAt || null,   // keep the original start so a same-day resume reports honest duration
+      finishedAt: gameFinishedAt || null   // keep the frozen finish so a resume doesn't keep the clock ticking past the solve/give-up
     }));
   } catch { /* storage blocked (private mode / file://) — progress just won't persist */ }
 }
 
-function restoreDailyState() {
+// Lock the board as an already-finished daily WITHOUT replaying guesses or
+// re-scoring/re-logging — used when we know the *outcome* (from the server, or a
+// minimal local marker) but not the original guess list. Reveals everything and
+// shows the banner; `serverFinished` keeps recordPlay/submitScore from clobbering
+// the authoritative server row with this 0-guess reconstruction.
+function showFinishedDaily(didSolve) {
+  serverFinished = true;
+  tokens.forEach(t => t.revealed = true);
+  if (didSolve) solved = true; else gaveUp = true;
+  draw();
+  document.getElementById("winHead").textContent = didSolve ? "DECLASSIFIED" : "GAVE UP";
+  document.getElementById("win").classList.add("show");
+  document.getElementById("winText").textContent = didSolve
+    ? 'Title: "' + META.title + '" — you already completed this daily.'
+    : 'The title was "' + META.title + '" — you already gave up on this daily.';
+  lockGame();
+  refreshMeta();
+  attribution(true);
+}
+
+async function restoreDailyState() {
   if (currentShare.kind !== "daily" || !dailyPuzzleId) return;
   let saved;
-  try { saved = JSON.parse(localStorage.getItem(stateKey(dailyPuzzleId))); } catch { return; }
-  if (!saved || saved.id !== dailyPuzzleId || !Array.isArray(saved.guesses)) return;
-  if (!saved.guesses.length && !saved.summaryUsed && !saved.fandomUsed && !saved.gaveUp) return;
+  try { saved = JSON.parse(localStorage.getItem(stateKey(dailyPuzzleId))); } catch { saved = null; }
+  // A minimal "finished" marker (written by restoreFinishedFromServer): locked
+  // outcome, empty guess list — re-lock directly without a server round-trip.
+  if (saved && saved.id === dailyPuzzleId && Array.isArray(saved.guesses)
+      && !saved.guesses.length && (saved.solved || saved.gaveUp)) {
+    showFinishedDaily(!!saved.solved); updateRevealBtn(); return;
+  }
+  const hasGuessData = saved && saved.id === dailyPuzzleId && Array.isArray(saved.guesses)
+    && (saved.guesses.length || saved.summaryUsed || saved.fandomUsed || saved.gaveUp);
+  if (!hasGuessData) { await restoreFinishedFromServer(); return; }
   restoring = true;                       // replay without re-saving each step
   // apply every saved guess to the model first, then render ONCE (not per guess)
   saved.guesses.forEach(g => { const k = norm(g.word); if (k && !guessed.has(k)) recordGuess(k, g.word, !!g.hint); });
   if (typeof saved.hintsLeft === "number") hintsLeft = Math.max(0, saved.hintsLeft);
   if (typeof saved.startedAt === "number" && saved.startedAt > 0) gameStartedAt = saved.startedAt;   // honest duration across resumes
+  if (typeof saved.finishedAt === "number" && saved.finishedAt > 0) gameFinishedAt = saved.finishedAt;   // restore the frozen finish so the duration stays put
   draw(); refreshMeta();
   checkWin();                             // marks solved + reveals all if the saved game was won
   if (saved.summaryUsed) showSummary();   // re-show the hints they had revealed
@@ -1856,6 +1991,32 @@ function restoreDailyState() {
   updateRevealBtn();
   if (!solved && !gaveUp) setStatus("Resumed your progress — " + guesses.length + " guess(es) so far.");
   recordPlay();   // sync the resumed snapshot to the play-log (no-op when logged out / nothing to record)
+}
+
+// No usable local state for this daily, but a *real* signed-in user may have
+// already finished it on another device (or as a now-merged guest) — that solve
+// lives in the private `plays` log (owner-only RLS scopes the query to auth.uid()).
+// If so, re-lock the daily as finished so it can't be replayed for stats, and drop
+// a minimal local marker so the next load needs no further server round-trip.
+// Best-effort: any failure leaves the daily freshly playable (never blocks play).
+async function restoreFinishedFromServer() {
+  if (!supa || !isRealUser() || !dailyPuzzleId || solved || gaveUp) return;
+  try {
+    const { data, error } = await supa.from("plays")
+      .select("solved,gave_up")
+      .eq("user_id", currentUser.id).eq("play_id", dailyPuzzleId)
+      .or("solved.eq.true,gave_up.eq.true")
+      .limit(1).maybeSingle();
+    if (error || !data || (!data.solved && !data.gave_up)) return;
+    showFinishedDaily(!!data.solved);
+    updateRevealBtn();
+    try {
+      localStorage.setItem(stateKey(dailyPuzzleId), JSON.stringify({
+        v: 1, id: dailyPuzzleId, guesses: [], hintsLeft,
+        solved: !!solved, summaryUsed: false, fandomUsed: false, gaveUp: !!gaveUp, startedAt: null
+      }));
+    } catch { /* storage blocked — we'll just re-query the server next load */ }
+  } catch { /* server unreachable — leave it playable */ }
 }
 
 // The latest daily *pointer* on/before today (Europe/Amsterdam), narrowed by
@@ -1976,7 +2137,7 @@ async function onAuth(session) {
   // follows: fold any local picks into the account on sign-in, then refresh the list
   if (isRealUser()) await mergeLocalFollowsToAccount();
   await loadFollows();
-  if (document.getElementById("settingsmodal").classList.contains("open")) renderFollowList();
+  if (document.getElementById("settingsmodal").classList.contains("open")) { syncProfileControls(); renderFollowList(); }
   renderFeed();   // the followed set may differ between account and local
 }
 
@@ -2069,6 +2230,7 @@ async function submitScore() {
   // per-fandom feed dailies are playable + shareable but not yet on a leaderboard.
   // anonymous guests log `plays` but never the public leaderboard — real accounts only
   if (!supa || !isRealUser() || !solved || currentShare.kind !== "daily" || !dailyDate || !dailyFeatured) return;
+  if (serverFinished) return;   // reconstructed end-state (0 guesses) — never push a bogus leaderboard row
   const reveals = guesses.filter(g => g.hint).length;
   const row = { user_id: currentUser.id, puzzle_date: dailyDate, guesses: guesses.length, reveals, solved: true };
   // keep the player's best (fewest guesses) for the day
@@ -2089,6 +2251,9 @@ async function submitScore() {
 // Best-effort: a failure here never blocks gameplay or the end-of-game UI.
 async function recordPlay() {
   if (!supa || !currentUser || restoring || !currentPlayId) return;
+  // restored-as-finished from the server: we have no real guess data, so logging
+  // would overwrite the authoritative server row with a 0-guess snapshot — skip.
+  if (serverFinished) return;
   // nothing meaningful has happened yet (article just loaded, no interaction) → skip,
   // so merely opening a puzzle doesn't create a row.
   if (!guesses.length && !solved && !gaveUp && !summaryUsed && !fandomUsed) return;
@@ -2115,7 +2280,9 @@ async function recordPlay() {
     summary_used: !!summaryUsed, source_used: !!fandomUsed,
     gave_up: !!gaveUp, solved: !!solved,
     started_at: gameStartedAt ? new Date(gameStartedAt).toISOString() : null,
-    duration_seconds: gameStartedAt ? Math.max(0, Math.round((Date.now() - gameStartedAt) / 1000)) : null
+    // freeze the clock once the game is over: use the finish timestamp if we have it,
+    // otherwise the live now — so a solved daily reopened later doesn't keep ticking.
+    duration_seconds: gameStartedAt ? Math.max(0, Math.round(((gameFinishedAt || Date.now()) - gameStartedAt) / 1000)) : null
   };
   // Upsert on (user_id, play_id): every in-progress call updates the same row, and
   // the finishing call flips solved/gave_up on it. Dailies share play_id across a
@@ -2151,40 +2318,25 @@ async function loadDailyMetrics() {
   titleEl.textContent = "Daily metrics — " + dailyDate;
   list.innerHTML = "<div class='empty'>Loading…</div>";
 
-  // aggregate stats for this exact daily (keyed by puzzle id), across all players
-  loadMetricsAggregate(stats);
-
-  const { data, error } = await supa.from("scores")
-    .select("guesses, reveals, user_id, profiles(username)")
-    .eq("puzzle_date", dailyDate)
-    .order("guesses", { ascending: true }).order("reveals", { ascending: true }).limit(20);
-  if (error) { list.innerHTML = "<div class='empty'>Couldn't load: " + error.message + "</div>"; return; }
-  if (!data || !data.length) { list.innerHTML = "<div class='empty'>No metrics yet — be the first!</div>"; return; }
-  list.innerHTML = "";
-  data.forEach((r, i) => {
-    const div = document.createElement("div");
-    div.className = "mrow" + (currentUser && r.user_id === currentUser.id ? " me" : "");
-    const name = (r.profiles && r.profiles.username) || "player";
-    const tail = r.reveals ? r.guesses + " (" + r.reveals + "r)" : String(r.guesses);
-    div.innerHTML = "<span class='rank'>" + (i + 1) + "</span>"
-      + "<span class='nm'></span><span class='sc'>" + tail + "</span>";
-    div.querySelector(".nm").textContent = name;
-    list.appendChild(div);
-  });
+  // aggregate stats for this exact daily (keyed by puzzle id), across all players.
+  // No per-player leaderboard here — just the anonymous aggregate numbers.
+  loadMetricsAggregate(stats, list);
 }
 
-// Pull the aggregate for the open daily and render the three stat cards. Best-effort:
+// Pull the aggregate for the open daily and render the stat cards. Best-effort:
 // a failure (or the RPC not deployed yet) just leaves the stats area empty.
-async function loadMetricsAggregate(stats) {
-  if (!dailyPuzzleId) return;
+async function loadMetricsAggregate(stats, list) {
+  if (!dailyPuzzleId) { list.innerHTML = ""; return; }
   let m;
   try {
     const { data, error } = await supa.rpc("daily_metrics", { p_puzzle_id: dailyPuzzleId });
-    if (error) return;
+    if (error) { const d = document.createElement("div"); d.className = "empty"; d.textContent = "Couldn't load: " + error.message; list.replaceChildren(d); return; }
     m = Array.isArray(data) ? data[0] : data;
-  } catch { return; }
-  if (!m || !m.players) return;
+  } catch { list.innerHTML = ""; return; }
+  if (!m || !m.players) { list.innerHTML = "<div class='empty'>No metrics yet — be the first!</div>"; return; }
+  list.innerHTML = "";
   const cards = [
+    { k: "Players", v: String(m.players) },
     { k: "Completion", v: (m.completion_pct ?? 0) + "%" },
     { k: "Avg guesses", v: m.avg_guesses != null ? Number(m.avg_guesses).toFixed(1) : "—" },
     { k: "Avg time", v: m.avg_seconds != null ? fmtDuration(m.avg_seconds) : "—" }
@@ -2299,7 +2451,7 @@ async function loadMyStats() {
     const { data, error } = await supa.from("plays")
       .select("game_type,wiki,puzzle_date,total_guesses,reveals,summary_used,source_used,gave_up,solved,duration_seconds")
       .eq("user_id", currentUser.id);
-    if (error) { body.innerHTML = "<div class='empty'>Couldn't load: " + error.message + "</div>"; return; }
+    if (error) { const d = document.createElement("div"); d.className = "empty"; d.textContent = "Couldn't load: " + error.message; body.replaceChildren(d); return; }
     statsRows = data || [];
   } catch (e) { if (!statsRows) body.innerHTML = "<div class='empty'>Couldn't load stats.</div>"; return; }
   renderMyStats();
@@ -2482,22 +2634,27 @@ function closeFeed() {
   document.getElementById("feedBackdrop").classList.remove("open");
   document.getElementById("feedBtn").classList.remove("active");
 }
+function openFeed() {
+  document.getElementById("feed").classList.add("open");
+  document.getElementById("feedBackdrop").classList.add("open");
+  document.getElementById("feedBtn").classList.add("active");
+  document.getElementById("authmodal").classList.remove("open");   // close the sign-in popup if it was up
+  renderFeed();
+  document.getElementById("feedSearch").focus();
+}
 document.getElementById("feedBtn").addEventListener("click", () => {
-  const panel = document.getElementById("feed");
-  const open = panel.classList.toggle("open");
-  document.getElementById("feedBackdrop").classList.toggle("open", open);
-  document.getElementById("feedBtn").classList.toggle("active", open);
-  if (open) {
-    document.getElementById("authmodal").classList.remove("open");   // close the sign-in popup if it was up
-    renderFeed();
-    document.getElementById("feedSearch").focus();
-  }
+  const open = !document.getElementById("feed").classList.contains("open");
+  if (open) openFeed(); else closeFeed();
 });
 document.getElementById("feedClose").addEventListener("click", closeFeed);
 document.getElementById("feedBackdrop").addEventListener("click", closeFeed);
 document.getElementById("feedSearch").addEventListener("input", filterFeedCards);
 document.getElementById("followSearch").addEventListener("input", filterFollowList);
 document.getElementById("homeDailySelect").addEventListener("change", e => setHomeDailyPref(e.target.value));
+document.getElementById("saveNameBtn").addEventListener("click", saveDisplayName);
+document.getElementById("displayNameInput").addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); saveDisplayName(); }
+});
 document.getElementById("darkToggle").addEventListener("change", e => setTheme(e.target.checked));
 document.getElementById("scrollToggle").addEventListener("change", e => {
   prefAutoScroll = e.target.checked;
