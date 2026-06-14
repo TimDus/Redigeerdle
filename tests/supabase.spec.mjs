@@ -2,8 +2,8 @@ import { test, expect } from "@playwright/test";
 
 // Integration tests for the Supabase-backed paths. app.spec.mjs deliberately
 // stubs Supabase to EMPTY (testing the graceful-absent fallback); here we mock
-// POPULATED REST responses so loadPuzzle (Supabase branch), loadLeaderboard
-// (row rendering) and submitScore (payload + best-score logic) run their real
+// POPULATED REST responses so loadPuzzle (Supabase branch), loadDailyMetrics
+// (aggregate + row rendering) and submitScore (payload + best-score logic) run their real
 // happy paths. The Supabase client is real, but every /rest/v1 call is
 // intercepted, so no live data is touched. The article body is still fetched
 // live from the pinned Fandom revision (same as app.spec's live tests).
@@ -28,6 +28,13 @@ const routeRest = async page => {
       body: '[{"host":"harrypotter.fandom.com"}]' }));
   await page.route("**/auth/v1/**", r =>
     r.fulfill({ status: 200, contentType: "application/json", body: "{}" }));
+  // the private play-log upsert (recordPlay) — swallow it so tests stay hermetic
+  await page.route("**/rest/v1/plays**", r =>
+    r.fulfill({ status: 201, contentType: "application/json", body: "[]" }));
+  // the daily-metrics aggregate RPC — return a fixed aggregate
+  await page.route("**/rest/v1/rpc/daily_metrics**", r =>
+    r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(
+      [{ players: 8, solved: 6, completion_pct: 75, avg_guesses: 12.5, avg_seconds: 134 }]) }));
 };
 
 test("loads the daily from Supabase (not the bundled fallback)", async ({ page }) => {
@@ -35,17 +42,18 @@ test("loads the daily from Supabase (not the bundled fallback)", async ({ page }
   await routeDaily(page);
   await page.goto("/");
   await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
-  // status names the puzzle by its Supabase date — proves the Supabase branch ran
-  await expect(page.locator("#status")).toContainText("Puzzle 2026-06-10 loaded");
+  // status names the puzzle by its Supabase date — proves the Supabase branch ran.
+  // The featured daily must NOT leak its fandom, so the line stays neutral (date only).
+  await expect(page.locator("#status")).toContainText("Daily puzzle (2026-06-10) loaded");
   // title redacted, body has the live-fetched (and redacted) article
   await expect(page.locator("#title .red:not(.shown)").first()).toBeVisible();
   expect(await page.locator("#body .red").count()).toBeGreaterThan(20);
 });
 
-test("leaderboard renders ranked rows from scores (sorting display + reveals + name fallback)", async ({ page }) => {
+test("daily metrics render the aggregate stats + ranked rows from scores (sorting display + reveals + name fallback)", async ({ page }) => {
   await routeRest(page);
   await routeDaily(page);
-  // leaderboard list query embeds profiles(username); return three pre-sorted rows
+  // the ranked-list query embeds profiles(username); return three pre-sorted rows
   await page.route("**/rest/v1/scores**", r =>
     r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([
       { guesses: 3, reveals: 0, user_id: "u1", profiles: { username: "Alice" } },
@@ -54,12 +62,19 @@ test("leaderboard renders ranked rows from scores (sorting display + reveals + n
     ]) }));
   await page.goto("/");
   await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
-  await page.click("#boardBtn");
-  await expect(page.locator("#boardmodal")).toHaveClass(/open/);
+  await page.click("#metricsBtn");
+  await expect(page.locator("#metricsmodal")).toHaveClass(/open/);
+  await expect(page.locator("#metricsTitle")).toContainText("2026-06-10");
 
-  const rows = page.locator("#boardList .lrow");
+  // aggregate stat cards from the daily_metrics RPC (completion %, avg guesses, avg time)
+  const cards = page.locator("#metricsStats .stat");
+  await expect(cards).toHaveCount(3);
+  await expect(cards.nth(0)).toContainText("75%");
+  await expect(cards.nth(1)).toContainText("12.5");
+  await expect(cards.nth(2)).toContainText("2m 14s");   // 134s → 2m 14s
+
+  const rows = page.locator("#metricsList .mrow");
   await expect(rows).toHaveCount(3);
-  await expect(page.locator("#boardTitle")).toContainText("2026-06-10");
   // rank 1: Alice, 3 guesses (no reveals → bare number)
   await expect(rows.nth(0).locator(".rank")).toHaveText("1");
   await expect(rows.nth(0).locator(".nm")).toHaveText("Alice");
@@ -127,6 +142,146 @@ test("submitScore keeps the player's best — no upsert when an existing score i
   await expect.poll(() => getDone, { timeout: 5_000 }).toBe(true);
   await page.waitForTimeout(300);
   expect(postCount).toBe(0);
+});
+
+test("recordPlay logs a finished daily to plays with game_type + good/wrong/reveal counts", async ({ page }) => {
+  await routeRest(page);
+  await routeDaily(page);
+  await page.route("**/rest/v1/scores**", r =>      // keep submitScore quiet
+    r.fulfill({ status: 200, contentType: "application/json", body: "[]" }));
+  let logged = null;
+  await page.route("**/rest/v1/plays**", r => {     // overrides routeRest's plays stub
+    if (r.request().method() === "POST") logged = JSON.parse(r.request().postData() || "{}");
+    return r.fulfill({ status: 201, contentType: "application/json", body: "[]" });
+  });
+  await page.goto("/");
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+  await page.evaluate(() => { currentUser = { id: "test-user-id" }; });
+
+  // one wrong guess, then solve → 1 wrong + 2 good, no reveals
+  await page.fill("#guess", "zzzzznotaword"); await page.press("#guess", "Enter");
+  await page.fill("#guess", "golden"); await page.press("#guess", "Enter");
+  await page.fill("#guess", "snitch"); await page.press("#guess", "Enter");
+  await expect(page.locator("#win")).toHaveClass(/show/);
+
+  // recordPlay upserts on every guess; wait for the FINAL (solved) upsert, not an
+  // earlier in-progress one
+  const lastRow = () => (Array.isArray(logged) ? logged[0] : logged);
+  await expect.poll(() => !!(lastRow() && lastRow().solved), { timeout: 5_000 }).toBe(true);
+  const row = lastRow();
+  expect(row).toMatchObject({
+    user_id: "test-user-id", play_id: "2026-06-10", game_type: "featured_daily",
+    wiki: "harrypotter.fandom.com", puzzle_date: "2026-06-10", puzzle_id: "2026-06-10",
+    revision_id: 2006074,                       // the pinned oldid played
+    total_guesses: 3, good_guesses: 2, wrong_guesses: 1, reveals: 0,
+    summary_used: false, source_used: false, gave_up: false, solved: true,
+  });
+  // duration + completion: derived fields are present and sane
+  expect(typeof row.started_at).toBe("string");
+  expect(row.duration_seconds).toBeGreaterThanOrEqual(0);
+  // revealed_pct reflects words uncovered through play (title solved → > 0, <= 100)
+  expect(row.revealed_pct).toBeGreaterThan(0);
+  expect(row.revealed_pct).toBeLessThanOrEqual(100);
+});
+
+test("recordPlay logs a started-but-unfinished game as an in-progress row", async ({ page }) => {
+  await routeRest(page);
+  await routeDaily(page);
+  await page.route("**/rest/v1/scores**", r =>
+    r.fulfill({ status: 200, contentType: "application/json", body: "[]" }));
+  let logged = null;
+  await page.route("**/rest/v1/plays**", r => {
+    if (r.request().method() === "POST") logged = JSON.parse(r.request().postData() || "{}");
+    return r.fulfill({ status: 201, contentType: "application/json", body: "[]" });
+  });
+  await page.goto("/");
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+  await page.evaluate(() => { currentUser = { id: "test-user-id" }; });
+
+  // one wrong guess, then stop — the game is neither solved nor given up
+  await page.fill("#guess", "zzzzznotaword"); await page.press("#guess", "Enter");
+
+  await expect.poll(() => logged, { timeout: 5_000 }).not.toBeNull();
+  const row = Array.isArray(logged) ? logged[0] : logged;
+  expect(row).toMatchObject({
+    user_id: "test-user-id", play_id: "2026-06-10", game_type: "featured_daily",
+    total_guesses: 1, good_guesses: 0, wrong_guesses: 1, reveals: 0,
+    solved: false, gave_up: false,              // started, not finished
+  });
+});
+
+test("anonymous guest logs plays but never the public leaderboard (scores)", async ({ page }) => {
+  await routeRest(page);
+  await routeDaily(page);
+  let scorePost = false, playPost = null;
+  await page.route("**/rest/v1/scores**", r => {
+    if (r.request().method() === "POST") scorePost = true;
+    return r.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+  });
+  await page.route("**/rest/v1/plays**", r => {
+    if (r.request().method() === "POST") playPost = JSON.parse(r.request().postData() || "{}");
+    return r.fulfill({ status: 201, contentType: "application/json", body: "[]" });
+  });
+  await page.goto("/");
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+  // an anonymous guest session (is_anonymous: true)
+  await page.evaluate(() => { currentUser = { id: "guest-id", is_anonymous: true }; });
+
+  await page.fill("#guess", "golden"); await page.press("#guess", "Enter");
+  await page.fill("#guess", "snitch"); await page.press("#guess", "Enter");
+  await expect(page.locator("#win")).toHaveClass(/show/);
+
+  // plays IS logged for the guest…
+  await expect.poll(() => playPost, { timeout: 5_000 }).not.toBeNull();
+  expect((Array.isArray(playPost) ? playPost[0] : playPost).user_id).toBe("guest-id");
+  // …but the public leaderboard is never written for an anonymous user
+  await page.waitForTimeout(300);
+  expect(scorePost).toBe(false);
+});
+
+test("signing into a real account merges the guest's plays via the merge-anon function", async ({ page }) => {
+  await routeRest(page);
+  await routeDaily(page);
+  let mergeBody = null;
+  await page.route("**/functions/v1/merge-anon**", r => {        // overrides routeRest's functions stub
+    mergeBody = JSON.parse(r.request().postData() || "{}");
+    return r.fulfill({ status: 200, contentType: "application/json", body: '{"merged":true}' });
+  });
+  await page.goto("/");
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+
+  // a real account is now signed in, with a pending guest-merge marker from before the swap
+  await page.evaluate(() => {
+    currentUser = { id: "real-id", is_anonymous: false };
+    localStorage.setItem("redigeerdle:anonmerge",
+      JSON.stringify({ id: "guest-id", token: "guest-token-xyz" }));
+  });
+  await page.evaluate(() => maybeMergeAnon());
+
+  await expect.poll(() => mergeBody, { timeout: 5_000 }).not.toBeNull();
+  expect(mergeBody.anon_token).toBe("guest-token-xyz");          // the captured guest token is handed over
+  // the pending-merge marker is cleared so it doesn't re-fire
+  expect(await page.evaluate(() => localStorage.getItem("redigeerdle:anonmerge"))).toBeNull();
+});
+
+test("maybeMergeAnon is a no-op when the saved guest id equals the current user", async ({ page }) => {
+  await routeRest(page);
+  await routeDaily(page);
+  let invoked = false;
+  await page.route("**/functions/v1/merge-anon**", r => {
+    invoked = true;
+    return r.fulfill({ status: 200, contentType: "application/json", body: '{"merged":false}' });
+  });
+  await page.goto("/");
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+  await page.evaluate(() => {
+    currentUser = { id: "same-id", is_anonymous: false };
+    localStorage.setItem("redigeerdle:anonmerge", JSON.stringify({ id: "same-id", token: "t" }));
+  });
+  await page.evaluate(() => maybeMergeAnon());
+  await page.waitForTimeout(300);
+  expect(invoked).toBe(false);                                   // nothing to merge into itself
+  expect(await page.evaluate(() => localStorage.getItem("redigeerdle:anonmerge"))).toBeNull();  // still cleared
 });
 
 // a daily WITHOUT a stored summary — the picker no longer bakes one in
@@ -262,19 +417,111 @@ test("daily feed lists the followed fandoms' dailies and highlights the loaded o
   await expect(page.locator("#feed")).toHaveClass(/open/);
 
   const cards = page.locator("#feedCards .feedcard");
-  await expect(cards).toHaveCount(2);
+  // pinned "Featured daily" (the featured general daily) + the 2 followed fandoms
+  await expect(cards).toHaveCount(3);
+  // the general daily is always pinned at the very top
+  await expect(cards.first()).toContainText("Featured daily");
   await expect(page.locator("#feedCards")).toContainText("Harry Potter");
   await expect(page.locator("#feedCards")).toContainText("The Legend of Zelda");
-  // the featured (Harry Potter) daily is the one loaded on the home page → highlighted
-  await expect(page.locator("#feedCards .feedcard.active")).toContainText("Harry Potter");
-  // both cards are playable buttons
+  // the featured daily is the one loaded on the home page → the pinned card is highlighted
+  await expect(cards.first()).toHaveClass(/active/);
+  // followed cards are playable buttons
   await expect(cards.filter({ hasText: "The Legend of Zelda" })).toHaveJSProperty("tagName", "BUTTON");
 
-  // the filter box is offered (2+ fandoms) and narrows the feed live
+  // the filter box is offered (2+ fandoms) and narrows the feed live; the pinned
+  // "Featured daily" stays visible regardless of the filter
   await expect(page.locator("#feedSearch")).toBeVisible();
   await page.fill("#feedSearch", "zelda");
   await expect(cards.filter({ hasText: "The Legend of Zelda" })).toBeVisible();
   await expect(cards.filter({ hasText: "Harry Potter" })).toBeHidden();
+  await expect(cards.filter({ hasText: "Featured daily" })).toBeVisible();
   await page.fill("#feedSearch", "");
   await expect(cards.filter({ hasText: "Harry Potter" })).toBeVisible();
+});
+
+test("Settings: the homepage-daily picker lists 'Featured daily' + followed fandoms and persists the choice", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("redigeerdle:follows",
+    JSON.stringify(["harrypotter.fandom.com", "zelda.fandom.com"])));
+  await page.route("**/functions/v1/**", r =>
+    r.fulfill({ status: 200, contentType: "application/json", body: '{"summary":""}' }));
+  await page.route("**/auth/v1/**", r => r.fulfill({ status: 200, contentType: "application/json", body: "{}" }));
+  await page.route("**/rest/v1/follows**", r => r.fulfill({ status: 200, contentType: "application/json", body: "[]" }));
+  await page.route("**/rest/v1/wikis**", r =>
+    r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([
+      { host: "harrypotter.fandom.com", display_name: "Harry Potter", icon: "🧙" },
+      { host: "zelda.fandom.com", display_name: "The Legend of Zelda", icon: "🛡️" },
+    ]) }));
+  // no homepage-daily pref → the home page loads the featured Harry Potter daily (live, known-good)
+  const featured = { id: "2026-06-12:harrypotter.fandom.com", date: "2026-06-12",
+    wiki: "harrypotter.fandom.com", revision_id: 2006074, is_featured: true };
+  await page.route("**/rest/v1/puzzles**", r =>
+    r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([featured]) }));
+  await page.goto("/");
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+
+  // open Settings → the homepage-daily picker
+  await page.click("#settingsBtn");
+  const sel = page.locator("#homeDailySelect");
+  await expect(sel.locator("option")).toHaveCount(3);          // "Featured daily" + the 2 followed fandoms
+  await expect(sel.locator("option").first()).toHaveText("Featured daily");
+  await expect(sel).toContainText("Harry Potter");
+  await expect(sel).toContainText("The Legend of Zelda");
+  await expect(sel).toHaveValue("");                           // default: the featured general daily
+
+  // picking a fandom persists it device-local…
+  await sel.selectOption("zelda.fandom.com");
+  expect(await page.evaluate(() => localStorage.getItem("redigeerdle:homedaily"))).toBe("zelda.fandom.com");
+  // …and re-opening Settings reflects the saved choice
+  await page.click("#settingsClose");
+  await page.click("#settingsBtn");
+  await expect(page.locator("#homeDailySelect")).toHaveValue("zelda.fandom.com");
+
+  // switching back to the general daily clears the stored pref
+  await page.locator("#homeDailySelect").selectOption("");
+  expect(await page.evaluate(() => localStorage.getItem("redigeerdle:homedaily"))).toBeNull();
+});
+
+// Shared scaffolding for the resume/reset boot tests. We record which `puzzles`
+// query boot fires: `wiki=eq.<host>` means it resumed the last-opened daily;
+// `is_featured` means it fell through to the homepage (featured) daily. The HP
+// article (revision 2006074) is known-good so the page settles either way.
+const HP = { id: "2026-06-12:harrypotter.fandom.com", date: "2026-06-12",
+  wiki: "harrypotter.fandom.com", revision_id: 2006074, is_featured: true };
+const routeBoot = async (page, urls) => {
+  await page.route("**/functions/v1/**", r =>
+    r.fulfill({ status: 200, contentType: "application/json", body: '{"summary":""}' }));
+  await page.route("**/auth/v1/**", r => r.fulfill({ status: 200, contentType: "application/json", body: "{}" }));
+  await page.route("**/rest/v1/follows**", r => r.fulfill({ status: 200, contentType: "application/json", body: "[]" }));
+  await page.route("**/rest/v1/wikis**", r =>
+    r.fulfill({ status: 200, contentType: "application/json", body: '[{"host":"harrypotter.fandom.com"}]' }));
+  await page.route("**/rest/v1/puzzles**", r => {
+    urls.push(r.request().url());
+    return r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([HP]) });
+  });
+};
+
+test("boot resumes the last-opened daily on a same-day reload", async ({ page }) => {
+  await page.addInitScript(() => {
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Amsterdam" }).format(new Date());
+    localStorage.setItem("redigeerdle:lastdaily", JSON.stringify({ wiki: "harrypotter.fandom.com", day: today }));
+  });
+  const urls = [];
+  await routeBoot(page, urls);
+  await page.goto("/");
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+  // resumed → it queried that fandom's daily directly, never the featured-home query
+  expect(urls.some(u => u.includes("wiki=eq.harrypotter.fandom.com"))).toBe(true);
+  expect(urls.some(u => u.includes("is_featured"))).toBe(false);
+});
+
+test("boot lands on the homepage daily once the dailies have reset (stale last-opened)", async ({ page }) => {
+  await page.addInitScript(() =>            // last opened on an old day → must NOT resume
+    localStorage.setItem("redigeerdle:lastdaily", JSON.stringify({ wiki: "harrypotter.fandom.com", day: "2000-01-01" })));
+  const urls = [];
+  await routeBoot(page, urls);             // no homepage pref → featured general daily
+  await page.goto("/");
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+  // stale → ignored the resume and went to the featured-home query
+  expect(urls.some(u => u.includes("is_featured"))).toBe(true);
+  expect(urls.some(u => u.includes("wiki=eq.harrypotter.fandom.com"))).toBe(false);
 });

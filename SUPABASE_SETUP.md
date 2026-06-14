@@ -140,6 +140,37 @@ secrets.
 > secrets for caching: Supabase injects `SUPABASE_URL` and
 > `SUPABASE_SERVICE_ROLE_KEY` into the function automatically.
 
+## Player stats & anonymous guests (the `plays` log)
+
+Every finished — and in-progress — game is logged to the private **`plays`** table
+(per-player stats: good/wrong guesses, reveals, hints/source used, gave-up, duration,
+% uncovered, etc.; see CLAUDE.md → "Play-log"). So this works even when the player
+hasn't made an account, the app uses **anonymous sign-ins**:
+
+**1. Enable anonymous sign-ins (dashboard — required):**
+**Authentication → Sign In / Providers → "Allow anonymous sign-ins" → on.** On first
+visit the app silently creates a guest session (no prompt, invisible to the player) so
+`plays` is logged from the start. Until you enable this, logged-out play simply isn't
+logged (nothing breaks). Notes:
+- Default rate limit is **30 anonymous sign-ins/hour/IP**; no CAPTCHA is wired up yet
+  (add Cloudflare Turnstile later if you see abuse).
+- **Anonymous users count toward MAU** in Supabase billing.
+
+**2. Deploy the `merge-anon` Edge Function (required for binding guest play to accounts):**
+When a guest signs into an account (new *or* existing), this re-parents the guest's
+`plays` onto that account, then deletes the guest user.
+```
+supabase functions deploy merge-anon          # JWT verification ON — do NOT pass --no-verify-jwt
+```
+**Or via the dashboard:** **Edge Functions → Deploy a new function**, name it
+`merge-anon`, paste `supabase/functions/merge-anon/index.ts`, leave **Verify JWT on**,
+deploy. It needs no extra secrets (`SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` are
+injected). The conflict logic lives in the `merge_anon_plays` SQL function (shipped by
+the migration); the Edge Function only validates the caller + the guest token and calls it.
+
+> Unlike `hint`, this function keeps **JWT verification ON** — it must know the real
+> caller (from their JWT) and is given the guest's token in the body to prove ownership.
+
 ## Adding or overriding a puzzle by hand
 You can always pin a specific article — for a themed day, or to override the
 auto-pick. Each puzzle is a pointer to a wiki article at a **specific revision**:

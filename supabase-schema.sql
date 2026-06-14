@@ -1,6 +1,14 @@
 -- ============================================================================
---  Redigeerdle — Supabase schema
---  Run this once in your project:  SQL Editor → New query → paste → Run.
+--  Redigeerdle — Supabase schema  ·  BASELINE SNAPSHOT ONLY (not current state)
+--
+--  This file mirrors the BASELINE migration (supabase/migrations/*_baseline.sql)
+--  and is NOT kept in sync with later migrations. The migrations in
+--  supabase/migrations/ are the single source of truth for prod's current shape —
+--  read those, not this file. Kept only as a one-shot bootstrap for spinning up a
+--  fresh project from scratch; after pasting it, run the migrations on top to reach
+--  the current schema (per-fandom dailies, is_featured, follows, wikis columns, …).
+--
+--  Run once in your project:  SQL Editor → New query → paste → Run.
 --  Safe to re-run: everything is "if not exists" / "drop policy if exists".
 -- ============================================================================
 

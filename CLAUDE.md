@@ -19,7 +19,10 @@ a standalone Node script run by GitHub Actions.
   The article text and the **title (the answer) are never stored**. The game fetches the article
   live from the Fandom API at a *pinned revision* (so it never drifts), and only words
   the player guesses get written into the DOM. Anything that would persist the answer
-  server-side is a regression.
+  server-side is a regression. (The `plays` log stores a `revision_id` — that's a
+  *pointer*, like `puzzles.revision_id`, not the answer text; it's safe because `plays`
+  is owner-only. Never expose `wiki` + `revision_id` together for *today's* featured
+  daily in any **public** surface — that would leak the source, itself a paid hint.)
 - **The `picked` table is private**: it holds titles (answers), so it has RLS enabled
   with **no policy** — only the picker's `service_role` key (which bypasses RLS)
   touches it. The anon/browser client must never read it.
@@ -59,6 +62,12 @@ per host — so the pool can mix Fandom, minecraft.wiki, Wikipedia (`en.wikipedi
 obscure (poor guessing targets) — disable `en.wikipedia.org` in the `wikis` table if its
 dailies feel unfair.
 
+`loadFromWikiUrl()` reports progress **and errors inside the New game modal**
+(`#urlMsg` via `setUrlMsg()`), not just on the `#status` bar — that bar is hidden
+behind the open modal, so a bad/malformed link used to look like a silent no-op.
+`parseWikiUrl()` throws human-readable messages (invalid URL, no title found, non-http),
+which `setUrlMsg(msg, true)` renders in red right under the input.
+
 ## Key files
 
 - [index.html](index.html) — the entire app. Top-level `let`/`function` declarations
@@ -70,17 +79,29 @@ dailies feel unfair.
   `node scripts/pick-daily.mjs --dry-run` (also `--date=`, `--force`).
 - [supabase/functions/hint/index.ts](supabase/functions/hint/index.ts) — Deno Edge
   Function that generates a spoiler-free hint via Groq (keeps the Groq key server-side).
+- [supabase/functions/merge-anon/index.ts](supabase/functions/merge-anon/index.ts) — Deno
+  Edge Function that re-parents an anonymous guest's `plays` onto a real account on
+  sign-in (see "Anonymous guests & account merge").
 - [.github/workflows/daily-puzzle.yml](.github/workflows/daily-puzzle.yml) — runs the
-  picker daily.
+  picker daily. GitHub cron is UTC-only with no DST, so to roll over at **local
+  (Amsterdam) midnight** year-round it fires at **both 22:00 and 23:00 UTC** (00:00
+  CEST and 00:00 CET respectively); whichever hits local midnight does the work and
+  the other is a no-op. The picker **exits early when that local date's dailies
+  already exist** (`alreadyPicked()`, unless `--force`), so the redundant run never
+  re-picks and burns fresh pool articles. (GitHub may still delay a scheduled run by
+  minutes-to-an-hour under load — that lag is outside our control.)
 - [puzzle.json](puzzle.json) — the bundled fallback pointer, used when Supabase is
   absent/empty (e.g. local dev without keys).
 
 ## Database & migrations
 
 The schema lives in **`supabase/migrations/`** and is managed with the Supabase CLI via
-`npx` (no global install). [supabase-schema.sql](supabase-schema.sql) is the
-human-readable full-state reference and matches the baseline migration; keep it in sync
-when you add migrations (or treat migrations as the source of truth).
+`npx` (no global install). **The migrations are the single source of truth** for the
+current schema — read them (not `supabase-schema.sql`) to know prod's shape.
+[supabase-schema.sql](supabase-schema.sql) is **only a baseline snapshot** (a
+human-readable, run-once-in-the-SQL-editor bootstrap that mirrors the baseline migration);
+it is deliberately **not** kept in sync with later migrations, so don't treat it as
+current. It's outside the `db push` pipeline, so its staleness never affects prod.
 
 The CLI runs **without `link`/`login`/access-token** — it connects straight to prod via
 `--db-url`, read from the gitignored `.env` (`SUPABASE_DB_URL`, a full Postgres
@@ -103,8 +124,17 @@ npx supabase db push --db-url "$SUPABASE_DB_URL"            # apply to PROD
   CLI migration commands therefore need `--db-url "$SUPABASE_DB_URL"`.
 - **`db push` writes to PROD** (there is no staging). Always `--dry-run` first and confirm
   with the user before the real push.
-- **RLS cannot be tested automatically here** (no local Supabase). Review RLS policies by
-  hand and state that they're unverified by tests.
+- **RLS isn't covered by the Playwright suite** (no local Supabase), but you CAN verify it
+  ad-hoc with `psql "$SUPABASE_DB_URL"` inside a `BEGIN … ROLLBACK` transaction (zero
+  residue): load the migration, seed rows as the owner (owner bypasses RLS), then
+  `set local role authenticated; set local request.jwt.claims = '{"sub":"<uuid>",...}'`
+  and assert who can read/write. Also `has_function_privilege('anon'/'authenticated'/
+  'service_role', 'fn(args)', 'execute')` for grants, and `set local role anon` +
+  `select … from picked` to confirm the answers table stays private. This is how the
+  `plays` owner-only policy, the `merge_anon_plays` grants, and the `picked`-is-private
+  invariant were checked — re-run that pattern after touching any policy/grant. (Running
+  the whole migration in a rolled-back txn also validates the DDL applies cleanly —
+  stronger than `db push --dry-run`, which doesn't execute it.)
 
 ## Tests
 
@@ -130,10 +160,16 @@ the header.
   (`puzzles` → `[]`), so it exercises the graceful "Supabase absent → puzzle.json
   fallback" paths.
 - [tests/supabase.spec.mjs](tests/supabase.spec.mjs) — Supabase happy paths. Mocks
-  **POPULATED** REST responses so `loadPuzzle` (Supabase branch), `loadLeaderboard` (row
-  rendering) and `submitScore` (payload + best-score logic) run for real. The Supabase
+  **POPULATED** REST responses so `loadPuzzle` (Supabase branch), `loadDailyMetrics`
+  (the `daily_metrics` RPC aggregate + scores row rendering — the **"Daily metrics"**
+  modal, formerly "Leaderboard"; DOM ids are `#metricsBtn`/`#metricsmodal`/`#metricsList`),
+  `submitScore` (payload + best-score logic) and `recordPlay` (the `plays`
+  log: finished-game payload + an in-progress/unfinished row) run for real. The Supabase
   client is real but every `**/rest/v1/**` call is intercepted; auth is faked by
-  assigning `currentUser` via `page.evaluate` (no real login).
+  assigning `currentUser` via `page.evaluate` (no real login). `routeRest` swallows
+  `**/rest/v1/plays**` so the per-guess `recordPlay` upserts stay hermetic; the
+  `recordPlay` tests override that route to capture the payload (and poll for the **final
+  `solved`** upsert, since one fires per guess).
 - [tests/picker.spec.mjs](tests/picker.spec.mjs) — pure-function unit tests for the
   picker. Imports the exported helpers; no browser, no network.
 
@@ -144,8 +180,21 @@ in the request URL or the method.
 
 ## Daily-feed follows (Settings)
 
-The header **Settings** button opens a modal with one section: **Daily feed** — pick
-which fandoms go in your feed
+The header **Settings** button opens a modal with **two** sections:
+
+**Preferences** (device-local prefs, all in `localStorage`):
+- **Dark mode** (`#darkToggle` → `setTheme()`, `redigeerdle:theme`). The palette is a set
+  of CSS variables on `:root`; `html.dark` overrides them (`--paper`/`--ink`/`--surface`/
+  `--hintbg`/…). A tiny **head script applies the saved theme before first paint** so there's
+  no light→dark flash on load. The yellow `--marker` (flash/locate highlights) keeps
+  hard-coded dark text in both themes — light text on yellow is unreadable.
+- **Jump to a word when you guess it** (`#scrollToggle` → `prefAutoScroll`,
+  `redigeerdle:autoscroll`, default on). When on, a correct typed guess scrolls the article
+  to that word (via `gotoWord(key, prefAutoScroll)`); when off, it still highlights the word
+  but doesn't scroll. `loadPrefs()` reads it at boot, `syncPrefControls()` reflects both
+  toggles when the modal opens.
+
+**Daily feed** — a **Homepage daily** picker (`#homeDailySelect`) plus the fandom follow list
 (searchable via `#followSearch` / `filterFollowList()`). Storage follows the rule:
 **signed in → the `follows` table** (own-only RLS);
 **logged out → `localStorage` (`redigeerdle:follows`)**. On sign-in, local picks are
@@ -162,11 +211,36 @@ fixed to the left edge below the header, opened by the header **hamburger** butt
 `#feedBtn`) — mutually exclusive with the auth panel; closes on Esc / card-click / the
 drawer's **×** (`#feedClose`) / clicking the dimmed backdrop (`#feedBackdrop`). The drawer
 starts at `top:var(--header-h)` and the `.topbar` sits above it (`z-index:45`) so the
-hamburger stays clickable to toggle the drawer shut. It reads `follows` and shows today's
-daily per followed fandom as a scrollable vertical list (icon, name, status ✓/✗/…/—).
+hamburger stays clickable to toggle the drawer shut. The **top card is always a pinned
+"Featured daily"** (`data-pinned`) — the featured general daily, rendered *before* the
+follows and **always shown** (never filtered out by the search box). It must **not reveal
+its fandom** — the source wiki is itself a paid hint (the **"Source"** button, `#fandomBtn`
+→ `showFandom()`/`fandomUsed`; internals keep the historical `fandom` name, the UI label and
+share text say **"Source"**) — so it uses a neutral ⭐ icon + the label
+"Featured daily", not the underlying wiki's name/favicon; clicking it calls `loadPuzzle()`
+(the featured home daily). Below it the drawer reads `follows` and shows today's daily per
+followed fandom as a scrollable vertical list (icon, name, status ✓/✗/…/—).
 `renderFeed()` only populates content — open/close is owned by `#feedBtn` / `closeFeed()`,
-not by `renderFeed`. Clicking a card loads that fandom's daily; a search box
+not by `renderFeed`. Clicking a follow card loads that fandom's daily; a search box
 (`#feedSearch`, shown at 2+ fandoms) narrows the rows live via `filterFeedCards()`.
+
+**Homepage daily** (`#homeDailySelect`, populated by `populateHomeDailySelect()` inside
+`renderFollowList`): the daily the player wants to land on **after the dailies reset** —
+either the featured **"Featured daily"** (value `""`, the default) or one of your
+**followed fandoms**. Stored device-local in `localStorage` (`redigeerdle:homedaily`), like
+the dark-mode / auto-scroll prefs (`homeDailyPref()` / `setHomeDailyPref()`). A
+previously-chosen fandom that's since been unfollowed stays selectable (labelled "(not
+followed)") so the saved choice isn't silently lost.
+
+**Boot / resume order** (no special URL): every daily load stamps
+`localStorage` (`redigeerdle:lastdaily` = `{ wiki, day: todayLocal() }`) via
+`rememberLastDaily()`. On boot we **resume the last-opened daily, but only while it's still
+the same local day** (`last.day === todayLocal()`, `loadDailyForWiki(last.wiki)`); once the
+dailies roll over at local (Europe/Amsterdam) midnight, `last.day` no longer matches and we
+fall through to the **homepage daily** (`homeDailyPref` → `loadDailyForWiki(home)`, or the
+featured daily). So: reload mid-day → same puzzle you were on; first visit of a new day →
+your configured homepage daily. (`?p=daily` still forces the featured daily regardless;
+`?d=` shared links still open that fandom's daily directly.)
 
 Header layout: three groups — the **hamburger** (`#feedBtn`, opens the daily-feed drawer)
 at the far left, the **brand** (`.brand` — title + **New game** + **How to play**) above
@@ -226,11 +300,111 @@ close; if a wiki still misses a day the feed shows "—" for it and it retries n
 - **Scoring**: only the **featured** daily is scored for now (`submitScore` guards on
   `dailyFeatured`); per-fandom feed dailies are playable + shareable but not yet on a
   leaderboard. Per-fandom leaderboards (repointing `scores` to `(user, wiki, date)`) are
-  the next step if wanted.
+  the next step if wanted. The richer per-game stats (all types, incl. random) live in
+  the separate **`plays`** log — see below; `scores` stays the leaderboard.
 - Bootstrap: the feed is only populated once the new picker has run for today (the
   per-fandom rows must exist). Run `node scripts/pick-daily.mjs` once after deploy.
+
+## Play-log & per-game stats (`plays`)
+
+The **`plays`** table (migration `20260613215424_add_plays_table.sql`) is a **private,
+per-player log of every game** — across **all** game types, not just the scored daily.
+It is **separate from `scores`** (the public leaderboard): `scores` is `unique(user_id,
+puzzle_date)`, `puzzle_date NOT NULL`, and **publicly readable**, which fits neither
+random/custom games (no date/identity) nor per-fandom dailies (shared date). `plays`
+solves that and also records `wiki` on every row, so later **per-fandom aggregates**
+(`GROUP BY wiki`) include dailies AND random plays alike.
+
+- **RLS is owner-only** (read/insert/update `auth.uid() = user_id`, modelled on
+  `follows`) — raw rows stay private, so a row's `wiki` can never leak today's featured
+  source to other players. **Public stats are exposed only via `security definer` RPCs**
+  that return aggregated numbers (never raw rows) — don't loosen the read policy to
+  `using (true)`. The first such RPC is **`daily_metrics(p_puzzle_id)`**
+  ([migration](supabase/migrations/20260614012445_add_daily_metrics_rpc.sql)): it
+  aggregates `plays` for **one daily** (keyed by `puzzle_id`, so date-sharing fandoms
+  don't blur) and returns `{players, solved, completion_pct, avg_guesses, avg_seconds}`
+  — `players` = everyone with a row for that puzzle (the completion-% denominator);
+  `avg_guesses`/`avg_seconds` are over **solved** plays only ("to complete"). `EXECUTE`
+  is revoked from `public` and re-granted to `anon`/`authenticated` (logged-out players
+  see the stats too). Broader per-fandom aggregates (`GROUP BY wiki`) can follow the same
+  pattern.
+- **`user_id` references `auth.users(id)`, NOT `profiles(id)`** (unlike `scores`/`follows`).
+  Anonymous guests log plays and have no profile row — see "Anonymous guests" below.
+- **What's logged** (`recordPlay()` in index.html): `game_type` (`featured_daily` /
+  `fandom_daily` / `full_random` / `curated_random` / `fandom_random` / `custom`),
+  `wiki`, `puzzle_date`/`puzzle_id` (dailies only), `revision_id`, `total_guesses`,
+  `good_guesses` (typed, ≥1 hit), `wrong_guesses` (typed, 0 hits), `reveals` (paid
+  free-word reveals), `revealed_pct`, `summary_used`, `source_used`, `gave_up`,
+  `solved`, `started_at`, `duration_seconds`.
+- **`game_type`** comes from `currentShare.gameType`, set in `loadArticle` (dailies:
+  `opts.featured ? featured_daily : fandom_daily`; the random/curated callers pass
+  `full_random`/`curated_random`/`fandom_random`; everything else = `custom`).
+- **In-progress AND finished**: `recordPlay()` upserts the *current snapshot* on **every
+  state change** (it's hooked into `saveDailyState()`, which already fires on every
+  guess/reveal/summary/source/finish for all types), not just at the end. A game
+  **started but never finished** simply stays as a row with `solved=false &
+  gave_up=false`. Guards: needs a session (a **guest/anonymous session counts** — see
+  below), skip during restore-replay (`restoring`), and skip a freshly-loaded game with
+  no interaction. Best-effort — a failure never blocks
+  gameplay. `checkWin`/`giveUp` no longer call `recordPlay` directly (the trailing
+  `saveDailyState()` covers them); `onAuth` and the tail of `restoreDailyState()` sync
+  the current snapshot on sign-in / resume.
+- **`play_id` is the upsert key** (`unique(user_id, play_id)`), so repeated calls update
+  ONE row. Dailies use `play_id = puzzle_id` (a same-day resume keeps the same row);
+  random/custom mint a fresh `play_id` per game (`mintPlayId()`), so each is its own row.
+- **`revealed_pct`** is derived from the **guesses** (sum of hits ÷ non-stop word count),
+  NOT the token state — because `checkWin`/`giveUp` reveal every token, the live token
+  state would always read 100%. So it honestly reflects how much the player uncovered
+  *through play* (meaningful for give-ups too).
+- **`started_at`/`duration_seconds`** use `gameStartedAt` (set in `initGame`), which is
+  **persisted in the daily localStorage state** (`startedAt`) and restored by
+  `restoreDailyState`, so a same-day resume reports an honest duration. It's wall-clock
+  (includes idle/away time). Cadence is **one upsert per guess** (chosen tradeoff);
+  debounce if write volume ever matters.
+
+## Anonymous guests & account merge
+
+So logged-out play still reaches `plays` (incl. random games), the app uses **Supabase
+anonymous auth**. This needs **"Allow anonymous sign-ins" enabled in the dashboard**
+(prod auth isn't in `config.toml` — the project isn't linked; see SUPABASE_SETUP.md).
+
+- **Silent guest session**: `initAuth` calls `signInAnonymously()` when there's no
+  session (and `signOut` starts a fresh one after). It's **invisible to the player** — no
+  prompt, no UI. `startGuestSession()` swallows failures (anon disabled / rate-limited →
+  play just stays local). Default rate limit is 30 anon sign-ins/hour/IP; **no CAPTCHA**
+  yet (add Turnstile later if abused). Anonymous users **count toward MAU**.
+- **`isRealUser()`** = signed in AND `!is_anonymous`. A guest behaves like **logged-out**
+  for the UI (`renderAuth`), the public leaderboard (`submitScore` is gated on
+  `isRealUser`), `follows` (localStorage, not the table), and `ensureProfile` (guests get
+  **no profile** — that's why `plays.user_id → auth.users`). But `recordPlay` writes for
+  guests too — that's the whole point.
+- **Merge on sign-in** (handles the "played a week as guest, then sign into an existing
+  account" case): before any sign-in, `captureAnonForMerge()` snapshots the guest
+  `{id, access_token}` into `localStorage` (`redigeerdle:anonmerge`). After `onAuth` sees
+  a **real** user with a different saved guest id, `maybeMergeAnon()` invokes the
+  **`merge-anon` Edge Function** ([supabase/functions/merge-anon/index.ts](supabase/functions/merge-anon/index.ts)),
+  then clears the marker. **One uniform path** for new *and* existing accounts (a brand-new
+  account is empty → no conflicts) — so we **don't** use `linkIdentity`/manual-linking.
+- **`merge-anon`** validates two proofs — the caller's real JWT (Authorization header;
+  deploy with **JWT verification ON**, i.e. *no* `--no-verify-jwt`) and the guest's
+  `anon_token` (body) — then calls the `security definer` SQL function
+  **`merge_anon_plays(p_anon, p_real)`** (service_role; `EXECUTE` revoked from
+  anon/authenticated, re-granted to service_role) to re-parent the guest's `plays`, and
+  finally deletes the guest user. **Conflict policy** when the same `play_id` exists under
+  both: *best/most-complete wins* — finished > in-progress, solved > gave_up, then more
+  `total_guesses`; exact tie keeps the existing real row.
+- **Testing**: the client trigger (`maybeMergeAnon` calls the function; a guest logs
+  `plays` not `scores`) is covered in `tests/supabase.spec.mjs`. The **`merge_anon_plays`
+  SQL + the migration itself** were verified by running the real migration and the five
+  conflict scenarios inside a `BEGIN … ROLLBACK` transaction against prod via `psql`
+  "$SUPABASE_DB_URL" (zero residue) — re-run that rollback test after touching the merge
+  SQL. Still **not** automatically tested (no local stack): the `merge-anon` Edge Function
+  wrapper and the true browser end-to-end (anon play → sign-in → merge) — smoke-test those
+  in the live app after deploy.
 
 ## Roadmap context
 
 Remaining open ideas: **per-fandom leaderboards** (repoint `scores` to `(user, wiki,
-date)`), and whether the feed should ever require an account. Both deferred.
+date)`); **public fandom-stats aggregates** over `plays` via a `security definer` RPC
+(keeps raw rows private); and whether the feed should ever require an account. All
+deferred.

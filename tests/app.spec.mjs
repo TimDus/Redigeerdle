@@ -14,6 +14,10 @@ test.beforeEach(async ({ page }) => {
   // don't hit the real "hint" Edge Function during tests
   await page.route("**/functions/v1/**", route =>
     route.fulfill({ status: 200, contentType: "application/json", body: '{"summary":""}' }));
+  // intercept ALL auth so boot's silent anonymous sign-in never touches the real
+  // project (it would create real guest users once anon sign-ins are enabled on prod)
+  await page.route("**/auth/v1/**", route =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "{}" }));
   // fixed wiki list for the "random from a fandom" autocomplete
   await page.route("**/rest/v1/wikis**", route =>
     route.fulfill({ status: 200, contentType: "application/json",
@@ -240,11 +244,11 @@ test("How to play opens a modal explaining the game and closes", async ({ page }
   await expect(page.locator("#helpmodal")).not.toHaveClass(/open/);
 });
 
-test("leaderboard popup opens", async ({ page }) => {
-  await page.click("#boardBtn");
-  await expect(page.locator("#boardmodal")).toHaveClass(/open/);
+test("daily metrics popup opens", async ({ page }) => {
+  await page.click("#metricsBtn");
+  await expect(page.locator("#metricsmodal")).toHaveClass(/open/);
   // some content is rendered (a message or rows), not left blank
-  await expect(page.locator("#boardList")).not.toBeEmpty();
+  await expect(page.locator("#metricsList")).not.toBeEmpty();
 });
 
 // The daily now loads a pinned revision live from the Fandom API. The shared-link
@@ -263,11 +267,12 @@ test("loads a pinned revision live from a real wiki", async ({ page }) => {
 test("clicking a guessed word in the history cycles through its occurrences in the text", async ({ page }) => {
   await page.goto("/?wiki=harrypotter.fandom.com&rev=2006074");
   await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
-  // find two distinct non-stop body words that each occur at least twice
+  // find two distinct non-stop, non-title body words that each occur at least
+  // twice (non-title so guessing them never solves the puzzle / skips the jump)
   const info = await page.evaluate(() => {
     const counts = {};
     tokens.forEach(t => { if (t.region === "body" && !t.stop && t.key) counts[t.key] = (counts[t.key] || 0) + 1; });
-    const multi = Object.keys(counts).filter(k => counts[k] >= 2);
+    const multi = Object.keys(counts).filter(k => counts[k] >= 2 && !isTitleWord(k));
     return { key: multi[0], n: counts[multi[0]], key2: multi[1] };
   });
   expect(info.key).toBeTruthy();
@@ -281,24 +286,24 @@ test("clicking a guessed word in the history cycles through its occurrences in t
   await expect(row).toHaveCount(1);
   // every occurrence is now shown in the body
   expect(await page.locator('#body span.shown[data-key="' + info.key + '"]').count()).toBe(info.n);
-  // clicking advances the cursor one hit at a time…
-  await row.click();
+  // a correct guess already highlights the word at its first occurrence…
   expect(await page.evaluate(k => wordNav.get(k), info.key)).toBe(1);
-  // every occurrence is marked, and exactly one (the jumped-to one) is distinct
   expect(await page.locator('#body span.locate-active[data-key="' + info.key + '"]').count()).toBe(1);
   expect(await page.locator('#body span.locate[data-key="' + info.key + '"]').count()).toBe(info.n - 1);
+  // …and clicking the history row advances to the next occurrence each time…
   await row.click();
   expect(await page.evaluate(k => wordNav.get(k), info.key)).toBe(2);
-  // …and wraps back to the first after the last occurrence
-  for (let i = 2; i < info.n; i++) await row.click();   // now at n
+  // …cycling through the rest and wrapping back to the first
+  for (let i = 3; i <= info.n; i++) await row.click();   // advance to the last → cursor at n
+  expect(await page.evaluate(k => wordNav.get(k), info.key)).toBe(info.n);
   await row.click();                                     // one past the end → wrap
   expect(await page.evaluate(k => wordNav.get(k), info.key)).toBe(1);
 
-  // picking a DIFFERENT word starts that word at occurrence 1 and resets the old one
+  // guessing a DIFFERENT word moves the highlight to it (occurrence 1) and resets the old one
   await page.fill("#guess", info.key2);
   await page.press("#guess", "Enter");
   const row2 = page.locator('#history .row.nav[data-key="' + info.key2 + '"]');
-  await row2.click();
+  await expect(row2).toHaveCount(1);
   expect(await page.evaluate(k => wordNav.get(k), info.key2)).toBe(1);          // new word: occurrence 1
   expect(await page.evaluate(k => wordNav.has(k), info.key)).toBe(false);       // previous word: cursor reset
 });
@@ -339,17 +344,50 @@ test("layout: the two-column play area is the default (article | controls grid)"
   await expect(page.locator("#playarea")).toHaveCSS("display", "grid");
   // and the controls column is the sticky right-hand cell
   await expect(page.locator("#controlcol")).toHaveCSS("position", "sticky");
-  // Settings no longer carries a Layout section — Daily feed is the only one
+  // Settings has two sections: Preferences (dark mode / jump-to-word) and Daily feed
   await page.click("#settingsBtn");
   const headers = page.locator("#settingsmodal .settings-h");
-  await expect(headers).toHaveCount(1);
-  await expect(headers.first()).toHaveText("Daily feed");
+  await expect(headers).toHaveCount(2);
+  await expect(headers.nth(0)).toHaveText("Preferences");
+  await expect(headers.nth(1)).toHaveText("Daily feed");
 });
 
 test("layout: collapses to a single column on a narrow viewport", async ({ page }) => {
   await page.setViewportSize({ width: 600, height: 900 });
   // below the 880px breakpoint #playarea is display:contents — single column
   await expect(page.locator("#playarea")).toHaveCSS("display", "contents");
+});
+
+test("Settings: Dark mode toggles the theme and persists across reloads", async ({ page }) => {
+  // starts light
+  await expect(page.locator("html")).not.toHaveClass(/dark/);
+  await page.click("#settingsBtn");
+  await page.locator("#darkToggle").check();
+  await expect(page.locator("html")).toHaveClass(/dark/);
+  expect(await page.evaluate(() => localStorage.getItem("redigeerdle:theme"))).toBe("dark");
+  // survives a reload (the head script re-applies it before paint) and the toggle reflects it
+  await page.reload();
+  await expect(page.locator("html")).toHaveClass(/dark/);
+  await page.click("#settingsBtn");
+  await expect(page.locator("#darkToggle")).toBeChecked();
+  // turning it off restores light and persists
+  await page.locator("#darkToggle").uncheck();
+  await expect(page.locator("html")).not.toHaveClass(/dark/);
+  expect(await page.evaluate(() => localStorage.getItem("redigeerdle:theme"))).toBe("light");
+});
+
+test("Settings: 'Jump to a word' is on by default and persists when turned off", async ({ page }) => {
+  await page.click("#settingsBtn");
+  await expect(page.locator("#scrollToggle")).toBeChecked();          // default on
+  expect(await page.evaluate(() => prefAutoScroll)).toBe(true);
+  await page.locator("#scrollToggle").uncheck();
+  expect(await page.evaluate(() => prefAutoScroll)).toBe(false);      // disables the auto-scroll
+  expect(await page.evaluate(() => localStorage.getItem("redigeerdle:autoscroll"))).toBe("0");
+  // survives a reload
+  await page.reload();
+  expect(await page.evaluate(() => prefAutoScroll)).toBe(false);
+  await page.click("#settingsBtn");
+  await expect(page.locator("#scrollToggle")).not.toBeChecked();
 });
 
 test("layout: the top bar is a sticky header and publishes its height as --header-h", async ({ page }) => {
@@ -403,6 +441,24 @@ test("custom-link parser handles Fandom, Wikipedia, minecraft.wiki and ?title= U
   expect(cases[3]).toMatchObject({ host: "minecraft.wiki", title: "Block of Resin" });   // /w/ path
   expect(cases[4]).toMatchObject({ host: "wiki.guildwars2.com", title: "Guild Wars 2" });
   expect(cases[5]).toMatchObject({ host: "wiki.guildwars2.com", title: "Mesmer" });       // ?title=
+});
+
+// A bad custom link must show an error IN the modal (the #status bar it also writes
+// is hidden behind the open modal, so previously a bad link looked like a no-op).
+test("Custom link shows an in-modal error for a malformed URL", async ({ page }) => {
+  await page.click("#newBtn");
+  await page.click("#ownBtn");
+  await page.fill("#url", "not-a-real-url");
+  await page.click("#loadUrlBtn");
+  const msg = page.locator("#urlMsg");
+  await expect(msg).toBeVisible();
+  await expect(msg).toHaveClass(/err/);
+  await expect(msg).toContainText("valid URL");
+  // the modal stays open so the user sees the feedback
+  await expect(page.locator("#newmodal")).toHaveClass(/open/);
+  // editing the field clears the stale error
+  await page.fill("#url", "https://en.wikipedia.org/wiki/Cat");
+  await expect(msg).toBeHidden();
 });
 
 // End-to-end proof for a non-Fandom wiki: Wikipedia's API is at /w/api.php, so
