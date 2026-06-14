@@ -66,7 +66,9 @@ dailies feel unfair.
 (`#urlMsg` via `setUrlMsg()`), not just on the `#status` bar — that bar is hidden
 behind the open modal, so a bad/malformed link used to look like a silent no-op.
 `parseWikiUrl()` throws human-readable messages (invalid URL, no title found, non-http),
-which `setUrlMsg(msg, true)` renders in red right under the input.
+which `setUrlMsg(msg, true)` renders in red right under the input. **On mobile** `setUrlMsg`
+also `scrollIntoView`s the error (the scrollable modal can push it below the fold), so the
+user immediately sees something went wrong — gated by `matchMedia("(max-width:640px)")`.
 
 ## Key files
 
@@ -265,14 +267,95 @@ block):
   would collide with the hamburger. Everything collapses into the centred `.topbar-inner`
   (max-width 1500/760, like `.wrap`): hamburger at the column's left, controls pushed
   right (`margin-left:auto`), brand just after the hamburger. A dedicated narrow/mobile
-  layout is still TODO.
+  layout is in progress (see **Mobile layout** below).
 
 Verify both sides of that breakpoint with `scripts/dev-screenshot.mjs` (see **Tests**).
 A small boot script keeps
-`--header-h` in sync with the header's rendered height (it wraps to two rows when
-narrow); the sticky guessbar / controls column (`#controlcol`) pin just below it via
-`calc(var(--header-h) + …)`, which is what keeps the controls column from sliding under
-the header while you scroll.
+`--header-h` in sync with the **`.topbar`'s full rendered height** (measured off the
+`.topbar` element itself — padding + border, margin excluded — not the inner header plus a
+magic offset, so it stays exact as the header wraps to two rows when narrow); the sticky
+guessbar / controls column (`#controlcol`) pin **directly below it** at `top:var(--header-h)`
+(no extra offset, and the `.topbar` has **no `margin-bottom`**), so the controls column
+borders the header with **no gap and no drift** as you scroll. The feed drawer / backdrop
+anchor at the same `top:var(--header-h)`.
+
+## Mobile layout
+
+A dedicated mobile layout is being built incrementally (separate from the
+`880px`/`1600px` desktop breakpoints above), all under one **`@media (max-width:640px)`**
+block.
+
+**Mobile header (done): one tidy row.** A `1fr auto 1fr` grid on `header` puts the
+**hamburger** (`#feedBtn`) flush left, the **brand title** (`#homeBtn`) dead-centre, and
+**Sign in/out** (`#authToggle`/`#signOutBtn`) flush right — the two `1fr` side columns
+balance so the title is screen-centred regardless of the side widths. The title still does
+what it does everywhere (`openHomeDaily()` → the configured homepage daily). Hidden here to
+make room: **New game** + **How to play** (in `.brand`) and **Settings** + the signed-in
+name (`.who`) (in `.controls`). `.controls button` is `white-space:nowrap` so "Sign in/out"
+stays on one line down to 320px. The hidden actions move into the **hamburger drawer** on
+mobile (see next).
+
+**Scrollable modals (done).** All popups (`.modal` — New game / Settings / How to play /
+Sign in / Daily metrics) get `overflow-y:auto` + `overscroll-behavior:contain` on the
+overlay, with `align-items:flex-start`, so a card taller than the viewport **scrolls** (the
+whole overlay scrolls, top stays reachable) instead of being clipped — important on short
+mobile screens. Mobile also trims the overlay padding to `4vh 10px` (from `9vh 16px`) for
+more usable height. Applies on all widths, but matters most on mobile.
+
+**Mobile drawer actions (done).** New game / Settings / How to play (hidden from the mobile
+header) live at the **bottom of the daily-feed drawer** as `.feed-actions` (`#feedActions`,
+buttons `#feedNewBtn`/`#feedSettingsBtn`/`#feedHelpBtn`), in the order **New game →
+Settings → How to play**. `.feed-actions` is `display:none` by default (desktop has these in
+the header) and `display:flex` only `≤640px`; it's `flex:0 0 auto` so it pins below the
+scrollable `.feed-cards`. Each handler **closes the drawer then calls the same action** as
+the header button (`openMenu()` / `openSettings()` / open `#helpmodal`). This is the mobile
+entry point for dark-mode / homepage-daily / follows (all inside Settings).
+
+**Mobile auto-hide header (done).** On mobile the top bar **hides while scrolling down and
+reappears while scrolling up** (the usual mobile pattern), instead of staying pinned. The
+`.topbar` is still `position:sticky`; a scroll handler toggles a **`.topbar--hidden`** class
+(`transform:translateY(-100%)`, with a `transition`) based on scroll direction — sticky
+reserves no gap once you've scrolled past, so the content doesn't jump when it hides. Gated
+by `matchMedia("(max-width:640px)")` so **desktop keeps the always-pinned sticky bar**; a
+small delta ignores scroll jitter and it never hides within 60px of the top. Leaving mobile
+width clears the class. (`--header-h` is unaffected; the left feed drawer still anchors at
+`top:var(--header-h)`.)
+
+**Mobile article top: buttons + Summary/Source output (done).** On mobile the top of the
+article shows only the **Share** + **Daily metrics** buttons (`.statusbtns`); the status
+message (`#status`) is **hidden** (`.statusbar .status { display:none }`). The **Summary**
+and **Source** *output* (not their buttons — those stay in the footer) appears right under
+those buttons: both `showSummary()` and `showFandom()` append into `#hintbox`, which a JS
+`placeHintbox()` **reparents by viewport** — mobile → just after `#statusbar` (in
+`#playarea`, styled `#playarea > .hintbox`, capped `38vh` with scroll); desktop → back into
+`#controlcol` above `#history` (unchanged). CSS `order` can't move a node across containers,
+hence the reparent; it runs at boot and on the `mqMobile` `change` event, and moving the
+node keeps any already-rendered text.
+
+**Tools + guesses + guesser → sticky footer (done).** Below **`640px`** the whole
+`#controlcol` (not just the guessbar) is **`position:fixed` to the bottom of the viewport**
+as a flex column, stacked top→bottom via `order`: the **tool buttons** (`.tools` — Reveal /
+Summary / Source / Give up; **always one row** — `flex-wrap:nowrap`, the four buttons share
+the width equally (`flex:1 1 0`) and their label scales with the viewport
+(`font-size:clamp(.52rem, 2.7vw, .66rem)`) so nothing wraps down to ~300px. The Reveal
+button also uses a **compact label on mobile**, `Word (N)` / `Cancel` instead of `Reveal a
+word (N left)`, set in `updateRevealBtn()` via a `matchMedia` check), the **guessed-words
+list** (`.history`, scrolls), then the
+**guesser row** (`.guessbar`). On mobile the guessbar gains a small **↑ back-to-top button**
+(`#guessTopBtn`, `.guess-top`) left of the `#guess` input (hidden on desktop via the base
+`.guess-top { display:none }`; same `scrollTo top` as the meta-row `#topBtn`), then the input,
+then a **smaller** `#go` Guess button. The footer is **capped
+at `3/7` of the viewport height** (`max-height:calc(100vh * 3 / 7)`); the history scrolls
+inside that cap, and with no guesses yet the footer shrinks to just tools + guesser.
+`z-index:30` keeps it **under the modals (`50`) and the feed drawer (`35`/`40`)** so those
+still cover it when open. The `.meta` strip (counts / show-lengths / Top) is **hidden** here
+(TODO: re-home it); the `.hintbox` (Summary/Source output) is reparented to the article top
+(see above), not in the footer. A JS sync publishes `#controlcol`'s live height as
+**`--footer-h`** (a `ResizeObserver`,
+mirroring the `--header-h` one) so `.wrap`'s `padding-bottom` tracks the footer as it
+grows/shrinks and the article's tail always clears it. Note `dev-screenshot.mjs` only
+captures `.topbar`, so to eyeball the footer take a full-viewport shot (e.g. a throwaway
+Playwright `page.screenshot` at `390×844`).
 
 `getWikiList()` is resilient to the `display_name`/`icon` columns not existing yet: it
 retries with `select("host")` so the list **always comes from the DB** (not the baked-in
@@ -361,6 +444,70 @@ solves that and also records `wiki` on every row, so later **per-fandom aggregat
   `restoreDailyState`, so a same-day resume reports an honest duration. It's wall-clock
   (includes idle/away time). Cadence is **one upsert per guess** (chosen tradeoff);
   debounce if write volume ever matters.
+
+## My stats (personal aggregate over `plays`)
+
+The **"My stats"** button opens the `#statsmodal` popup — a Wordle/Jaardle-style
+**personal** dashboard. It is the per-player counterpart to **Daily metrics**: where Daily
+metrics aggregates *everyone* for *one* puzzle via the `daily_metrics` RPC, My stats
+aggregates the *caller's* *own* games across *all* time and types. It **reads the raw
+`plays` rows directly** (`loadMyStats()` → `supa.from("plays").select(...).eq("user_id",
+currentUser.id)`) — no RPC needed because the **owner-only RLS already scopes the query to
+`auth.uid()`**, so it can only ever return your own rows. **No DB migration** — pure client
+aggregation over data that already exists. Works for a **guest session too** (this device's
+anonymous account); the modal shows a "Sign in to keep your stats across devices" note when
+`!isRealUser()`.
+
+**Button placement** (two entry points, never both visible):
+- **Desktop**: `#statsBtn` in the header `.controls`, just left of **Settings**. Hidden
+  `≤640px` (same rule that hides `#settingsBtn`/`.who`).
+- **Mobile**: `#feedStatsBtn` at the **bottom of the hamburger drawer** `.feed-actions`
+  (after New game / Settings / How to play), like the other drawer actions — closes the
+  drawer then calls `openStats()`.
+
+**Layout — a source selector on top, then two split sections:**
+- **Source selector** (`#statsSource`, built in JS so option labels use the wiki helpers
+  via `textContent`): **Combined** (everything) or one source. A "source" is the wiki host
+  (`sourceKeyOf`), **EXCEPT featured dailies, which fold into a neutral "⭐ Featured daily"
+  pseudo-source** — the modal **never names a featured wiki** (the source is itself a paid
+  hint, same invariant as the feed's pinned card). Changing it re-renders from the cached
+  `statsRows` (no refetch). `statsSource` persists across opens; resets to Combined if the
+  saved source vanishes from the data.
+- **Dailies** (`featured_daily` + `fandom_daily`, `DAILY_TYPES`/`isDailyRow`): 8 tiles —
+  Played, Solved %, Current/Best streak, Avg guesses (over **solved**), Avg time, Clean
+  solves (solved with **no reveals, no summary, no source** — our analogue of Jaardle's
+  "perfect"), Gave up — plus the heatmap.
+- **Free play** (`full_random` / `curated_random` / `fandom_random` / `custom`): the same
+  tiles **minus the two streak tiles** (streaks are a daily concept), no heatmap.
+- Each section shows "No daily/free play games yet." when the scoped set is empty (e.g. the
+  "Featured daily" source has no free play).
+
+**Shared helpers:** `aggregate(rows)` → played/solved/winPct/gaveUp/clean/avgGuesses/
+avgSeconds for either section; `dailyStreaks(dailyRows)` → consecutive calendar days with a
+**solved daily** (current counts back from today, or yesterday if today isn't solved yet so
+an unplayed today doesn't break it; best is the longest run); `heatmapHTML(dailyRows)` → a
+119-day (17-week) contribution grid (green `.cell.solved` = solved a daily that day, red
+`.cell.missed` = played but solved none, gray = none; today's cell carries a `.today` yellow
+ring so the player can locate it; oldest-left, weekday-aligned via `mondayIndex()` padding).
+**The cell classes are `solved`/`missed`, NOT `win`/`loss`** — `.win` is the global
+"DECLASSIFIED" banner class (`display:none` until `.show`), so a heatmap cell with class
+`win` was silently hidden (0×0, but with a green *computed* style, so class-count/
+`getComputedStyle` checks falsely passed — assert `toBeVisible()` instead). Likewise avoid
+`done` (feed-card class). Keep new heatmap classes scoped/unique. It keys each daily
+by its **`puzzle_date`** (the puzzle's own date), NOT the calendar day it was played — so
+today's cell only greens when you solve the daily *dated* today; if the nightly picker
+hasn't produced today's featured daily yet, `latestPointer` serves an earlier-dated one and
+the green lands on that day, today staying gray. All date math is `ymdMinus()` (DST-safe,
+noon-UTC anchored) against `todayLocal()`.
+**Combined** scopes nothing, so the streak/heatmap count a day if **any** source's daily was
+solved that day.
+
+- **Live refresh**: like the metrics modal, an open stats modal re-renders after each
+  `recordPlay()` upsert and on `onAuth` (sign-in swaps whose stats these are).
+- Covered in `tests/supabase.spec.mjs` ("My stats splits dailies vs free play…"): routes
+  the `plays` **GET** to fixture rows (split from the `recordPlay` POST by method), asserts
+  the two sections + tile counts, the neutral source options (no `harrypotter`), the heatmap
+  counts, and that filtering to `__featured__` empties the Free play section.
 
 ## Anonymous guests & account merge
 

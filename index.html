@@ -34,7 +34,11 @@
      hamburger + brand sit above the article, the controls above the guess column.
      JS keeps --header-h in sync with the bar's height (it wraps to 2 rows when
      narrow) so the sticky guessbar / controls column below stick just under it. */
-  .topbar { position:sticky; top:0; z-index:45; background:var(--paper); margin-bottom:18px; padding-top:24px; border-bottom:3px solid var(--ink); }
+  .topbar { position:sticky; top:0; z-index:45; background:var(--paper); padding-top:24px; border-bottom:3px solid var(--ink); transition:transform .25s ease; }
+  /* mobile auto-hide: JS adds this class while scrolling down and removes it
+     while scrolling up (see the scroll handler). It slides the stuck bar off the
+     top; sticky reserves no gap once you've scrolled past, so content doesn't jump. */
+  .topbar.topbar--hidden { transform:translateY(-100%); }
   .topbar-inner { padding-bottom:14px; }
   header { position:relative; display:flex; align-items:center; justify-content:center; gap:10px 16px; flex-wrap:wrap; }
   h1 { font-family:var(--mono); font-weight:700; letter-spacing:.18em; font-size:1.5rem; margin:0; text-transform:uppercase; cursor:pointer; display:inline-block; }
@@ -68,11 +72,35 @@
     header > .controls { position:static; transform:none; margin-left:auto; }
     .brand { width:auto; max-width:none; padding:0; }
   }
+  /* ---- mobile header: one tidy row — hamburger (left), brand title (centre,
+     → the configured daily), sign in/out (right). The secondary actions move
+     elsewhere: New game / How to play (in .brand) and Settings + the signed-in
+     name (in .controls) are hidden here for now. The brand flexes to fill the
+     middle and centres its title, so it sits between the two edge groups without
+     wrapping to a second row. */
+  @media (max-width:640px) {
+    .topbar { padding-top:14px; }
+    /* a 1fr auto 1fr grid puts the title in the dead centre of the screen: the two
+       1fr side columns balance regardless of the hamburger vs sign-in widths. */
+    header { display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:8px; }
+    header > .iconbtn { justify-self:start; }
+    .brand { justify-self:center; min-width:0; flex-wrap:nowrap; gap:0; }
+    .brand #newBtn, .brand #helpBtn { display:none; }
+    header > .controls { justify-self:end; flex-wrap:nowrap; }
+    .controls #settingsBtn, .controls #statsBtn, .controls .who { display:none; }
+    .controls button { white-space:nowrap; padding:5px 9px; font-size:.66rem; }
+    .iconbtn { padding:6px 8px; }
+    h1 { font-size:1.15rem; letter-spacing:.12em; white-space:nowrap; }
+  }
   /* new-game modal */
-  .modal { display:none; position:fixed; inset:0; z-index:50; background:rgba(26,26,26,.55); align-items:flex-start; justify-content:center; padding:9vh 16px; }
+  /* overflow-y:auto + align-items:flex-start lets a card taller than the viewport
+     scroll (the whole overlay scrolls, top stays reachable) instead of being clipped. */
+  .modal { display:none; position:fixed; inset:0; z-index:50; background:rgba(26,26,26,.55); align-items:flex-start; justify-content:center; padding:9vh 16px; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; }
   .modal.open { display:flex; }
   .modal-card { position:relative; width:100%; max-width:440px; background:var(--paper); border:3px solid var(--ink); box-shadow:8px 8px 0 rgba(26,26,26,.18); padding:22px 22px 24px; }
   .modal-x { position:absolute; top:8px; right:8px; width:30px; height:30px; padding:0; font-size:1.2rem; line-height:1; background:var(--paper); color:var(--ink); }
+  /* mobile: less vertical padding so the (scrollable) card uses more of the screen */
+  @media (max-width:640px) { .modal { padding:4vh 10px; } }
   .modal-title { font-family:var(--mono); text-transform:uppercase; letter-spacing:.14em; font-size:1.05rem; margin:0 0 16px; }
   .howto { font-family:var(--mono); font-size:.82rem; line-height:1.55; margin:0; padding-left:18px; }
   .howto li { margin:0 0 10px; }
@@ -103,6 +131,7 @@
 
   .guessbar { display:flex; gap:8px; margin-bottom:6px; position:sticky; top:0; background:var(--paper); padding:10px 0; z-index:5; border-bottom:1px solid var(--line); }
   .guesswrap { position:relative; flex:1; display:flex; }
+  .guess-top { display:none; }   /* mobile-only; shown in the footer guessbar (see the 640px rule) */
   #guess { flex:1; font-family:var(--mono); font-size:1rem; padding:11px 38px 11px 12px; border:2px solid var(--ink); background:var(--surface); color:var(--ink); }
   #guess:focus { outline:3px solid var(--marker); outline-offset:-1px; }
   .gcount { position:absolute; right:12px; top:50%; transform:translateY(-50%); font-family:var(--mono); font-size:.85rem; font-weight:700; color:var(--muted); pointer-events:none; }
@@ -156,10 +185,10 @@
   .statusbtns button:hover:not(:disabled) { background:var(--ink); color:var(--paper); border-color:var(--ink); }
   #article { grid-area:article; }
   /* the controls column follows you down the page as the (taller) article scrolls —
-     pinned just below the sticky top bar. The +18px matches .topbar's margin-bottom,
-     so the stuck position equals the column's natural top at scroll 0 → it locks
-     exactly where it already is, with no little drift as you start scrolling. */
-  #controlcol { grid-area:controls; display:flex; flex-direction:column; position:sticky; top:calc(var(--header-h, 90px) + 18px); align-self:start; }
+     pinned directly below the sticky top bar. --header-h is the top bar's full rendered
+     height (no margin between them), so the stuck position equals the column's natural
+     top at scroll 0 → it locks flush against the header with no gap and no drift. */
+  #controlcol { grid-area:controls; display:flex; flex-direction:column; position:sticky; top:var(--header-h, 90px); align-self:start; }
   #controlcol .guessbar { position:static; }   /* the whole column is sticky now */
   #controlcol .history { max-height:55vh; }
   @media (max-width:880px) {
@@ -167,6 +196,52 @@
     #playarea, #controlcol { display:contents; }
     #controlcol .guessbar { position:sticky; top:var(--header-h, 90px); }
     #controlcol .history { max-height:120px; }
+  }
+
+  /* ---- mobile: tools + guessed-words list + guesser drop into a sticky footer ----
+     Below 640px the whole #controlcol becomes a fixed bar pinned to the bottom of
+     the viewport, stacked top→bottom: the tool buttons (reveal / summary / source /
+     give up), then the guessed-words list (scrolls), then the guesser row. The bar
+     is capped at 3/7 of the viewport height so a long history can't swallow the
+     screen — the list scrolls inside that cap; with no guesses yet it shrinks to
+     just tools + guesser. z-index 30 keeps it under the modals (50) and feed drawer
+     (35/40). --footer-h (synced live by JS) pads .wrap so the article's tail clears
+     the bar. The meta strip is hidden here for now (TODO: re-home it on mobile). */
+  @media (max-width:640px) {
+    #controlcol {
+      display:flex; flex-direction:column; gap:6px;
+      position:fixed; left:0; right:0; bottom:0; top:auto;
+      max-height:calc(100vh * 3 / 7);
+      margin:0; padding:8px 12px;
+      background:var(--paper); border-top:2px solid var(--ink);
+      z-index:30;
+    }
+    #controlcol .tools { order:1; margin:0; flex:0 0 auto; gap:5px; flex-wrap:nowrap; }
+    /* always one row: the four buttons share the width equally and their label
+       scales with the viewport (clamp + vw) so nothing wraps down to ~300px. */
+    #controlcol .tools button {
+      flex:1 1 0; min-width:0; white-space:nowrap;
+      padding:6px 4px; letter-spacing:.02em;
+      font-size:clamp(.52rem, 2.7vw, .66rem);
+    }
+    #controlcol .history  { order:3; margin:0; max-height:none; flex:1 1 auto; min-height:0; overflow-y:auto; }
+    #controlcol .guessbar {
+      order:4; position:static; margin:0; padding:0; gap:6px;
+      background:none; border:none;
+    }
+    #controlcol #guess { font-size:.85rem; padding:8px 30px 8px 10px; }
+    #controlcol #go { padding:8px 9px; font-size:.62rem; flex:0 0 auto; }
+    /* small "back to top" button left of the guess field (mobile only) */
+    #controlcol .guess-top { display:inline-flex; align-items:center; justify-content:center; flex:0 0 auto; padding:8px 10px; font-size:1rem; line-height:1; }
+    #controlcol .meta { display:none; }
+    .wrap { padding-bottom:calc(var(--footer-h, 150px) + 12px); }
+    /* the status message is dropped on mobile; only the Share / Daily-metrics
+       buttons stay at the top of the article. */
+    .statusbar .status { display:none; }
+    .statusbar { margin-bottom:8px; }
+    /* the Summary / Source OUTPUT (their buttons stay in the footer) is reparented
+       by JS to sit here, right under those buttons at the top of the article. */
+    #playarea > .hintbox { margin:8px 0 12px; max-height:38vh; overflow-y:auto; }
   }
 
   article { font-size:1.08rem; }
@@ -259,6 +334,13 @@
   .feedcard.empty { cursor:default; opacity:.55; }
   .feedcard .fc-status { font-weight:700; color:var(--classified); }
   .feed-empty { font-family:var(--mono); font-size:.74rem; color:var(--muted); }
+  /* mobile-only quick actions pinned at the bottom of the drawer (New game /
+     Settings / How to play). On desktop these live in the header, so hidden here. */
+  .feed-actions { display:none; flex:0 0 auto; }
+  @media (max-width:640px) {
+    .feed-actions { display:flex; flex-direction:column; gap:7px; padding-top:12px; border-top:1px solid var(--line); }
+    .feed-actions button { width:100%; }
+  }
 
   /* daily metrics (rendered inside the #metricsmodal popup) */
   /* aggregate stats for the open daily (avg guesses / time / completion %) */
@@ -273,6 +355,29 @@
   #metricsList .mrow .rank { width:2.2em; color:var(--muted); }
   #metricsList .mrow .nm { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #metricsList .empty { color:var(--muted); }
+
+  /* personal stats (rendered inside the #statsmodal popup) */
+  .statgrid { display:grid; grid-template-columns:repeat(4, 1fr); gap:8px; margin-bottom:16px; }
+  .statgrid .stat { text-align:center; background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:9px 4px; }
+  .statgrid .stat .v { font-family:var(--mono); font-size:1.25rem; font-weight:700; line-height:1.1; }
+  .statgrid .stat .k { font-size:.6rem; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin-top:3px; }
+  .stats-section-h { font-size:.66rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 8px; }
+  /* contribution-style heatmap of featured-daily results */
+  .statcal { display:grid; grid-auto-flow:column; grid-template-rows:repeat(7, 11px); grid-auto-columns:11px; gap:2px; margin-bottom:6px; overflow-x:auto; padding-bottom:2px; }
+  .statcal .cell { width:11px; height:11px; border-radius:2px; background:var(--line); }
+  .statcal .cell.solved { background:#3aa657; }
+  .statcal .cell.missed { background:var(--classified); }
+  .statcal .cell.pad  { background:transparent; }
+  .statcal .cell.today { box-shadow:inset 0 0 0 1.5px var(--marker); }
+  .statcal-legend { display:flex; gap:12px; font-size:.6rem; color:var(--muted); margin-bottom:18px; }
+  .statcal-legend .sw { display:inline-block; width:10px; height:10px; border-radius:2px; vertical-align:-1px; margin-right:4px; }
+  /* the top source selector (Combined / a single source) */
+  .stats-source-row { display:flex; align-items:center; gap:8px; margin-bottom:16px; }
+  .stats-source-lbl { font-size:.62rem; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); flex:0 0 auto; }
+  .stats-source { flex:1; padding:7px 9px; background:var(--surface); color:var(--ink); border:1px solid var(--line); border-radius:8px; font:inherit; font-size:.85rem; cursor:pointer; }
+  .stats-source:focus { outline:2px solid var(--marker); outline-offset:-1px; }
+  #statsBody .empty { color:var(--muted); font-size:.85rem; }
+  .stats-note { font-size:.72rem; color:var(--muted); margin-top:14px; padding-top:10px; border-top:1px solid var(--line); }
 </style>
 </head>
 <body>
@@ -288,6 +393,7 @@
       <button id="helpBtn" class="ghost">How to play</button>
     </div>
     <div class="controls">
+      <button id="statsBtn" class="ghost">My stats</button>
       <button id="settingsBtn" class="ghost">Settings</button>
       <button id="authToggle" class="ghost">Sign in</button>
       <button id="signOutBtn" class="ghost" style="display:none">Sign out</button>
@@ -306,6 +412,12 @@
     </div>
     <input id="feedSearch" class="feed-search" type="text" placeholder="search feed…" autocomplete="off" hidden>
     <div class="feed-cards" id="feedCards"></div>
+    <div class="feed-actions" id="feedActions">
+      <button id="feedNewBtn" class="ghost">New game</button>
+      <button id="feedSettingsBtn" class="ghost">Settings</button>
+      <button id="feedHelpBtn" class="ghost">How to play</button>
+      <button id="feedStatsBtn" class="ghost">My stats</button>
+    </div>
   </aside>
 
   <div class="modal" id="newmodal" aria-hidden="true">
@@ -373,17 +485,26 @@
     </div>
   </div>
 
+  <div class="modal" id="statsmodal" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-label="My stats">
+      <button class="modal-x" id="statsClose" aria-label="Close">&times;</button>
+      <h2 class="modal-title">My stats</h2>
+      <div id="statsBody"><div class="empty">Loading…</div></div>
+    </div>
+  </div>
+
   <div class="modal" id="helpmodal" aria-hidden="true">
     <div class="modal-card" role="dialog" aria-modal="true" aria-label="How to play">
       <button class="modal-x" id="helpClose" aria-label="Close">&times;</button>
       <h2 class="modal-title">How to play</h2>
       <ul class="howto">
         <li>You get a real wiki article with every word blacked out — only the word <em>lengths</em> show (like <span class="red">█████</span> <span class="red">███</span>).</li>
-        <li>Type a word and press Enter — every place that word appears is revealed.</li>
-        <li>Your real goal is to guess the hidden <strong>title</strong> at the top. Crack it and you win.</li>
-        <li>Stuck? <strong>Show hint summary</strong> gives a spoiler-free clue about the topic.</li>
-        <li>A fresh <strong>Daily</strong> puzzle drops every day. Want more? <strong>New game</strong> → curated, full random, a specific fandom, or your own wiki link.</li>
-        <li>When you solve it (or give up), <strong>Share</strong> your result.</li>
+        <li>Type a word and press Enter — every place that word appears in the article is revealed.</li>
+        <li>Your real goal is to uncover the hidden <strong>title</strong> at the top. Crack it and you win.</li>
+        <li>Stuck on a word? <strong>Reveal a word</strong> lets you click any blacked-out word in the text to expose it — you get 3 free reveals, but title words stay locked.</li>
+        <li>Need a nudge on the topic? <strong>Summary</strong> gives a spoiler-free clue, and <strong>Source</strong> reveals which wiki the article is from.</li>
+        <li>A fresh <strong>Daily</strong> puzzle drops every day. In <strong>Settings</strong> you can follow your favourite fandoms (each gets its own daily) and pick which one you land on; open the <strong>☰</strong> menu to browse and play them. Want more? <strong>New game</strong> → curated, full random, a specific fandom, or your own wiki link.</li>
+        <li>When you solve it (or <strong>Give up</strong>), <strong>Share</strong> your result — and check <strong>Daily metrics</strong> to see how everyone else did.</li>
       </ul>
     </div>
   </div>
@@ -428,6 +549,7 @@
       </div>
 
       <div class="guessbar">
+        <button type="button" id="guessTopBtn" class="guess-top" aria-label="Scroll to top" title="Back to top">↑</button>
         <div class="guesswrap">
           <input id="guess" type="text" placeholder="type a word and press enter" autocomplete="off" disabled>
           <span id="guesscount" class="gcount"></span>
@@ -780,10 +902,14 @@ function handleBodyClick(e) {
 
 function updateRevealBtn() {
   const b = document.getElementById("revealBtn");
+  // mobile gets the compact label ("Word (3)" / "Cancel") so it fits the footer tools row
+  const mobile = window.matchMedia("(max-width:640px)").matches;
   if (solved || gaveUp) { b.disabled = true; return; }   // game over — never re-enable
-  if (hintsLeft <= 0) { b.textContent = "No reveals left"; b.disabled = true; return; }
+  if (hintsLeft <= 0) { b.textContent = mobile ? "Word (0)" : "No reveals left"; b.disabled = true; return; }
   b.disabled = false;
-  b.textContent = revealArmed ? "Pick a word… (cancel)" : "Reveal a word (" + hintsLeft + " left)";
+  b.textContent = revealArmed
+    ? (mobile ? "Cancel" : "Pick a word… (cancel)")
+    : (mobile ? "Word (" + hintsLeft + ")" : "Reveal a word (" + hintsLeft + " left)");
 }
 
 function appendHint(node) {
@@ -1070,6 +1196,11 @@ function setUrlMsg(msg, isErr) {
   el.textContent = msg || "";
   el.classList.toggle("show", !!msg);
   el.classList.toggle("err", !!isErr);
+  // mobile: on an error, scroll it into view inside the (scrollable) modal so the
+  // user immediately sees something went wrong — the message can sit below the fold.
+  if (isErr && window.matchMedia("(max-width:640px)").matches) {
+    requestAnimationFrame(() => el.scrollIntoView({ behavior: "smooth", block: "center" }));
+  }
 }
 
 async function loadFromWikiUrl(rawUrl) {
@@ -1841,6 +1972,7 @@ async function onAuth(session) {
   if (solved && currentShare.kind === "daily") submitScore();      // save a score solved before signing in
   recordPlay();                                                    // log the current game under the (guest or real) id
   if (document.getElementById("metricsmodal").classList.contains("open")) loadDailyMetrics();
+  if (document.getElementById("statsmodal").classList.contains("open")) loadMyStats();   // sign-in swaps whose stats these are
   // follows: fold any local picks into the account on sign-in, then refresh the list
   if (isRealUser()) await mergeLocalFollowsToAccount();
   await loadFollows();
@@ -1988,7 +2120,11 @@ async function recordPlay() {
   // Upsert on (user_id, play_id): every in-progress call updates the same row, and
   // the finishing call flips solved/gave_up on it. Dailies share play_id across a
   // resume; random/custom each have their own minted play_id.
-  try { await supa.from("plays").upsert(row, { onConflict: "user_id,play_id" }); }
+  try {
+    await supa.from("plays").upsert(row, { onConflict: "user_id,play_id" });
+    // keep an open "My stats" panel live as the player guesses/finishes
+    if (document.getElementById("statsmodal").classList.contains("open")) loadMyStats();
+  }
   catch { /* stats are best-effort */ }
 }
 
@@ -2065,6 +2201,193 @@ function openMetrics() {
 }
 function closeMetrics() { document.getElementById("metricsmodal").classList.remove("open"); }
 
+// ---- personal stats ----
+// "My stats" = an aggregate over the player's OWN `plays` rows (all game types). Unlike
+// "Daily metrics" (everyone, one daily, via the security-definer RPC), this reads the
+// raw rows directly — owner-only RLS already scopes the query to auth.uid(), so it only
+// ever returns the caller's own plays. Works for a guest session too (this device's
+// anonymous account); a real account just makes it cross-device.
+//
+// The modal splits stats into DAILIES (featured/fandom dailies) and FREE PLAY
+// (random/custom), with a top SOURCE selector: "Combined" (everything) or one source.
+// A "source" is the wiki host, EXCEPT featured dailies, which fold into a neutral
+// "Featured daily" pseudo-source (⭐) so the modal never names a featured wiki — the
+// source is itself a paid hint, same invariant as the feed's pinned card.
+
+let statsRows = null;                 // last-fetched own `plays` rows (cached across re-renders)
+let statsSource = "__combined__";     // current source-selector value
+
+// step back n calendar days from a YYYY-MM-DD string (DST-safe: anchored at noon UTC)
+function ymdMinus(ymd, n) {
+  const [y, m, d] = ymd.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d, 12));
+  dt.setUTCDate(dt.getUTCDate() - n);
+  return dt.toISOString().slice(0, 10);
+}
+// Monday-based weekday index (0=Mon … 6=Sun) for grid row placement
+function mondayIndex(ymd) {
+  const [y, m, d] = ymd.split("-").map(Number);
+  return (new Date(Date.UTC(y, m - 1, d, 12)).getUTCDay() + 6) % 7;
+}
+
+const DAILY_TYPES = new Set(["featured_daily", "fandom_daily"]);
+const isDailyRow = r => DAILY_TYPES.has(r.game_type);
+// a row's source key: featured dailies stay neutral; everything else is its wiki host
+const sourceKeyOf = r => r.game_type === "featured_daily" ? "__featured__" : (r.wiki || "—");
+
+// the played/solved/clean/avg block shared by both Dailies and Free play
+function aggregate(rows) {
+  const solved = rows.filter(r => r.solved);
+  const clean  = solved.filter(r => !r.reveals && !r.summary_used && !r.source_used);
+  const dur    = solved.filter(r => r.duration_seconds != null);
+  const mean = (arr, f) => arr.length ? arr.reduce((s, r) => s + (f(r) || 0), 0) / arr.length : null;
+  return {
+    played: rows.length,
+    solved: solved.length,
+    winPct: rows.length ? Math.round(solved.length / rows.length * 100) : 0,
+    gaveUp: rows.filter(r => r.gave_up).length,
+    clean: clean.length,
+    avgGuesses: mean(solved, r => r.total_guesses),
+    avgSeconds: mean(dur, r => r.duration_seconds)
+  };
+}
+
+// daily streaks over a set of daily rows: consecutive calendar days with a SOLVED daily.
+// For "Combined" the rows span all sources, so a day counts if ANY daily was solved.
+function dailyStreaks(dailyRows) {
+  const today = todayLocal();
+  const solvedDates = new Set(dailyRows.filter(r => r.solved && r.puzzle_date).map(r => r.puzzle_date));
+  let cur = 0, cursor = solvedDates.has(today) ? today : ymdMinus(today, 1);
+  while (solvedDates.has(cursor)) { cur++; cursor = ymdMinus(cursor, 1); }
+  let best = 0, run = 0, prev = null;
+  for (const d of [...solvedDates].sort()) { run = (prev && ymdMinus(d, 1) === prev) ? run + 1 : 1; best = Math.max(best, run); prev = d; }
+  return { cur, best };
+}
+
+// 119-day (17-week) contribution grid over daily rows. green = solved a daily that day,
+// red = played but solved none, gray = none. (Combined → "did a daily on any source".)
+function heatmapHTML(dailyRows) {
+  const today = todayLocal(), DAYS = 119;
+  const byDate = new Map();
+  for (const r of dailyRows) {
+    if (!r.puzzle_date) continue;
+    byDate.set(r.puzzle_date, (byDate.get(r.puzzle_date) || false) || !!r.solved);
+  }
+  const oldest = ymdMinus(today, DAYS - 1);
+  const cells = [];
+  for (let i = 0; i < mondayIndex(oldest); i++) cells.push("<span class='cell pad'></span>");
+  for (let i = DAYS - 1; i >= 0; i--) {
+    const d = ymdMinus(today, i);
+    let cls = "cell";
+    if (byDate.has(d)) cls += byDate.get(d) ? " solved" : " missed";
+    if (d === today) cls += " today";
+    cells.push("<span class='" + cls + "' title='" + d + (d === today ? " (today)" : "") + "'></span>");
+  }
+  return cells.join("");
+}
+
+const tileHTML = t => "<div class='stat'><div class='v'>" + t.v + "</div><div class='k'>" + t.k + "</div></div>";
+const gridHTML = tiles => "<div class='statgrid'>" + tiles.map(tileHTML).join("") + "</div>";
+
+async function loadMyStats() {
+  const body = document.getElementById("statsBody");
+  if (!supa) { body.innerHTML = "<div class='empty'>Configure Supabase to enable stats.</div>"; return; }
+  if (!currentUser) { body.innerHTML = "<div class='empty'>No session yet — stats appear once you've played a game.</div>"; return; }
+  if (!statsRows) body.innerHTML = "<div class='empty'>Loading…</div>";   // keep prior render during a live refresh
+  try { await getWikiList(); } catch { /* nicer labels if available; falls back to host */ }
+  try {
+    const { data, error } = await supa.from("plays")
+      .select("game_type,wiki,puzzle_date,total_guesses,reveals,summary_used,source_used,gave_up,solved,duration_seconds")
+      .eq("user_id", currentUser.id);
+    if (error) { body.innerHTML = "<div class='empty'>Couldn't load: " + error.message + "</div>"; return; }
+    statsRows = data || [];
+  } catch (e) { if (!statsRows) body.innerHTML = "<div class='empty'>Couldn't load stats.</div>"; return; }
+  renderMyStats();
+}
+
+function renderMyStats() {
+  const body = document.getElementById("statsBody");
+  const rows = statsRows || [];
+  if (!rows.length) {
+    body.innerHTML = "<div class='empty'>No games played yet — solve a puzzle and your stats land here.</div>"
+      + (!isRealUser() ? "<div class='stats-note'>Playing as a guest. Sign in to keep your stats across devices.</div>" : "");
+    return;
+  }
+
+  // distinct sources for the selector (featured first, then by play count). Built from
+  // ALL rows so the dropdown is stable regardless of the current filter.
+  const srcMap = new Map();
+  for (const r of rows) {
+    const key = sourceKeyOf(r);
+    let e = srcMap.get(key);
+    if (!e) { e = { key, featured: key === "__featured__", host: key === "__featured__" ? null : r.wiki, count: 0 }; srcMap.set(key, e); }
+    e.count++;
+  }
+  const sources = [...srcMap.values()].sort((a, b) => (b.featured - a.featured) || (b.count - a.count));
+  if (statsSource !== "__combined__" && !srcMap.has(statsSource)) statsSource = "__combined__";
+
+  // scope rows to the selected source, then split daily vs free play
+  const scoped  = statsSource === "__combined__" ? rows : rows.filter(r => sourceKeyOf(r) === statsSource);
+  const dailies = scoped.filter(isDailyRow);
+  const free    = scoped.filter(r => !isDailyRow(r));
+
+  const dAgg = aggregate(dailies), dStreak = dailyStreaks(dailies), fAgg = aggregate(free);
+
+  const dTiles = [
+    { k: "Played", v: dAgg.played }, { k: "Solved", v: dAgg.winPct + "%" },
+    { k: "Current streak", v: dStreak.cur }, { k: "Best streak", v: dStreak.best },
+    { k: "Avg guesses", v: dAgg.avgGuesses != null ? dAgg.avgGuesses.toFixed(1) : "—" },
+    { k: "Avg time", v: dAgg.avgSeconds != null ? fmtDuration(dAgg.avgSeconds) : "—" },
+    { k: "Clean solves", v: dAgg.clean }, { k: "Gave up", v: dAgg.gaveUp }
+  ];
+  const fTiles = [
+    { k: "Played", v: fAgg.played }, { k: "Solved", v: fAgg.winPct + "%" },
+    { k: "Avg guesses", v: fAgg.avgGuesses != null ? fAgg.avgGuesses.toFixed(1) : "—" },
+    { k: "Avg time", v: fAgg.avgSeconds != null ? fmtDuration(fAgg.avgSeconds) : "—" },
+    { k: "Clean solves", v: fAgg.clean }, { k: "Gave up", v: fAgg.gaveUp }
+  ];
+
+  const legend = "<div class='statcal-legend'>"
+    + "<span><span class='sw' style='background:#3aa657'></span>Solved</span>"
+    + "<span><span class='sw' style='background:var(--classified)'></span>Missed</span>"
+    + "<span><span class='sw' style='background:var(--line)'></span>Not played</span>"
+    + "<span><span class='sw' style='background:var(--line);box-shadow:inset 0 0 0 1.5px var(--marker)'></span>Today</span></div>";
+
+  const dailiesBlock = "<div class='stats-section-h'>Dailies</div>"
+    + (dailies.length
+        ? gridHTML(dTiles) + "<div class='statcal'>" + heatmapHTML(dailies) + "</div>" + legend
+        : "<div class='empty'>No daily games yet.</div>");
+  const freeBlock = "<div class='stats-section-h' style='margin-top:18px'>Free play</div>"
+    + (free.length ? gridHTML(fTiles) : "<div class='empty'>No free play games yet.</div>");
+
+  body.innerHTML = "<div class='stats-source-row'></div>" + dailiesBlock + freeBlock
+    + (!isRealUser() ? "<div class='stats-note'>Playing as a guest. Sign in to keep your stats across devices.</div>" : "");
+
+  // build the source selector in JS so option labels use the wiki helpers (textContent,
+  // never injecting host text unescaped)
+  const selRow = body.querySelector(".stats-source-row");
+  const lbl = document.createElement("label"); lbl.className = "stats-source-lbl"; lbl.setAttribute("for", "statsSource"); lbl.textContent = "Source";
+  const sel = document.createElement("select"); sel.id = "statsSource"; sel.className = "stats-source";
+  const combined = document.createElement("option"); combined.value = "__combined__"; combined.textContent = "Combined"; sel.appendChild(combined);
+  sources.forEach(s => {
+    const o = document.createElement("option"); o.value = s.key;
+    o.textContent = s.featured ? "⭐ Featured daily" : labelForHost(s.host);
+    sel.appendChild(o);
+  });
+  sel.value = statsSource;
+  sel.addEventListener("change", () => { statsSource = sel.value; renderMyStats(); });
+  selRow.appendChild(lbl); selRow.appendChild(sel);
+}
+
+function openStats() {
+  closeFeed();   // don't leave the drawer open behind the popup
+  document.getElementById("statsmodal").classList.add("open");
+  statsSource = "__combined__";   // always open on Combined so a fresh solve is never hidden behind a stale source filter
+  statsRows = null;               // force a fresh fetch + Loading… on open
+  loadMyStats();
+}
+function closeStats() { document.getElementById("statsmodal").classList.remove("open"); }
+
 // ---- auth event wiring ----
 document.getElementById("authToggle").addEventListener("click", () => {
   closeFeed();   // don't leave the drawer open behind the popup
@@ -2086,6 +2409,11 @@ document.getElementById("metricsClose").addEventListener("click", closeMetrics);
 document.getElementById("metricsmodal").addEventListener("click", e => {
   if (e.target.id === "metricsmodal") closeMetrics();
 });
+document.getElementById("statsBtn").addEventListener("click", openStats);
+document.getElementById("statsClose").addEventListener("click", closeStats);
+document.getElementById("statsmodal").addEventListener("click", e => {
+  if (e.target.id === "statsmodal") closeStats();
+});
 
 document.getElementById("go").addEventListener("click", submitGuess);
 document.getElementById("guess").addEventListener("keydown", e => { if (e.key === "Enter") submitGuess(); });
@@ -2098,6 +2426,9 @@ document.getElementById("history").addEventListener("click", e => {
   if (row && row.dataset.key) gotoWord(row.dataset.key);
 });
 document.getElementById("topBtn").addEventListener("click", () =>
+  window.scrollTo({ top: 0, behavior: "smooth" }));
+// mobile: the ↑ button left of the guess field does the same (quick scroll to top)
+document.getElementById("guessTopBtn").addEventListener("click", () =>
   window.scrollTo({ top: 0, behavior: "smooth" }));
 document.getElementById("summaryBtn").addEventListener("click", showSummary);
 document.getElementById("fandomBtn").addEventListener("click", showFandom);
@@ -2137,6 +2468,12 @@ document.getElementById("helpClose").addEventListener("click", () => document.ge
 document.getElementById("helpmodal").addEventListener("click", e => {
   if (e.target.id === "helpmodal") e.currentTarget.classList.remove("open");
 });
+// mobile drawer quick actions: close the drawer, then trigger the same action as the
+// (hidden-on-mobile) header buttons. New game / Settings / How to play.
+document.getElementById("feedNewBtn").addEventListener("click", () => { closeFeed(); openMenu(); });
+document.getElementById("feedSettingsBtn").addEventListener("click", () => { closeFeed(); openSettings(); });
+document.getElementById("feedHelpBtn").addEventListener("click", () => { closeFeed(); document.getElementById("helpmodal").classList.add("open"); });
+document.getElementById("feedStatsBtn").addEventListener("click", () => { closeFeed(); openStats(); });
 
 // daily-feed drawer (slides in from the left, opened by the header hamburger):
 // toggles open, renders the followed dailies
@@ -2180,6 +2517,7 @@ document.addEventListener("keydown", e => {
   document.getElementById("helpmodal").classList.remove("open");
   document.getElementById("authmodal").classList.remove("open");
   closeMetrics();
+  closeStats();
   closeFeed();
 });
 document.getElementById("ownBtn").addEventListener("click", () => {
@@ -2209,19 +2547,73 @@ document.getElementById("fandomSearch").addEventListener("input", filterFandomPi
 document.getElementById("fandomSearch").addEventListener("keydown", e => { if (e.key === "Enter") goFandom(); });
 document.getElementById("shareBtn").addEventListener("click", doShare);
 
-/* ---- sticky top bar: publish the header's height as --header-h so the sticky
-   guessbar / controls column below pin just under it. The header wraps to two rows
-   on narrow viewports, so track it live. The +27 covers the .topbar's top padding
-   (24px) and bottom border (3px), i.e. the full pinned height above the content. */
+/* ---- sticky top bar: publish the bar's full rendered height as --header-h so the
+   sticky guessbar / controls column (and the feed drawer) pin directly below it with
+   no gap. We measure the .topbar itself (padding + border included, margin excluded =
+   exactly the pinned height) rather than the inner header + a magic offset, so it stays
+   correct as the header wraps to two rows on narrow viewports. */
 const headerEl = document.querySelector("header");
+const topbarEl = document.querySelector(".topbar");
 function syncHeaderH() {
   // getBoundingClientRect() is sub-pixel exact (offsetHeight rounds to an integer),
   // so the sticky controls lock without a sub-pixel jitter as you scroll.
-  document.documentElement.style.setProperty("--header-h", (headerEl.getBoundingClientRect().height + 27) + "px");
+  document.documentElement.style.setProperty("--header-h", topbarEl.getBoundingClientRect().height + "px");
 }
-if (window.ResizeObserver) new ResizeObserver(syncHeaderH).observe(headerEl);
+if (window.ResizeObserver) new ResizeObserver(syncHeaderH).observe(topbarEl);
 else window.addEventListener("resize", syncHeaderH);
 syncHeaderH();
+
+/* ---- mobile sticky footer: publish #controlcol's live height as --footer-h so
+   .wrap's bottom padding tracks the footer (which grows/shrinks as the
+   guessed-words list fills, capped at 3/7 vh). Only consumed by the <640px rule;
+   harmless elsewhere. */
+const controlColEl = document.getElementById("controlcol");
+function syncFooterH() {
+  document.documentElement.style.setProperty("--footer-h", controlColEl.getBoundingClientRect().height + "px");
+}
+if (window.ResizeObserver) new ResizeObserver(syncFooterH).observe(controlColEl);
+else window.addEventListener("resize", syncFooterH);
+syncFooterH();
+
+/* ---- mobile auto-hide header: hide the top bar while scrolling DOWN, reveal it
+   while scrolling UP (only on mobile — desktop keeps the always-pinned sticky bar).
+   The bar is sticky, so sliding it off the top with translateY(-100%) leaves no
+   gap. A small delta ignores scroll jitter; we never hide near the very top.
+   (topbarEl is declared above, where --header-h is measured.) */
+const mqMobile = window.matchMedia("(max-width:640px)");
+let lastScrollY = window.scrollY;
+function onScrollHeader() {
+  const y = window.scrollY;
+  if (!mqMobile.matches) { topbarEl.classList.remove("topbar--hidden"); lastScrollY = y; return; }
+  if (Math.abs(y - lastScrollY) < 6) return;            // ignore tiny moves (jitter)
+  if (y > lastScrollY && y > 60) topbarEl.classList.add("topbar--hidden");   // scrolling down
+  else if (y < lastScrollY) topbarEl.classList.remove("topbar--hidden");     // scrolling up
+  lastScrollY = y;
+}
+window.addEventListener("scroll", onScrollHeader, { passive: true });
+
+/* The Summary / Source output (#hintbox — both showSummary and showFandom append
+   into it) lives in the controls column on desktop, but on mobile it belongs at the
+   TOP of the article, right under the Share / Daily-metrics buttons. CSS `order`
+   can't move it across containers, so reparent the node by viewport: mobile → just
+   after the statusbar (in #playarea); desktop → back into #controlcol above the
+   guessed-words history. Moving the node keeps any already-rendered content. */
+const hintboxEl = document.getElementById("hintbox");
+const statusbarEl = document.getElementById("statusbar");
+const historyEl = document.getElementById("history");
+function placeHintbox() {
+  if (mqMobile.matches) {
+    if (statusbarEl.nextElementSibling !== hintboxEl) statusbarEl.after(hintboxEl);
+  } else if (historyEl.previousElementSibling !== hintboxEl) {
+    controlColEl.insertBefore(hintboxEl, historyEl);
+  }
+}
+placeHintbox();
+
+// react to crossing the mobile breakpoint: re-show the header and re-place the hintbox
+function onMobileMqChange() { topbarEl.classList.remove("topbar--hidden"); placeHintbox(); if (typeof META !== "undefined" && META) updateRevealBtn(); }
+if (mqMobile.addEventListener) mqMobile.addEventListener("change", onMobileMqChange);
+else mqMobile.addListener(onMobileMqChange);
 
 // boot: a shared link reproduces the exact same puzzle; otherwise the homepage daily.
 // `?g=` is the opaque custom token (hides the fandom); `?wiki=&rev=` is the old
