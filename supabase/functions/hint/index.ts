@@ -21,7 +21,11 @@
 // See SUPABASE_SETUP.md.
 //
 // Request  (POST):  { "title": "<answer>", "text": "<excerpt>", "puzzleId"?: "<id>" }
-// Response (JSON):  { "summary": "<hint or empty>", "status": "ready" | "pending" }
+// Response (JSON):  { "summary": "<packet or empty>", "status": "ready" | "pending" }
+//   `summary` carries a JSON STRING of the layered hint packet
+//   {"category","summary","first_letter"} (or "" when no usable hint). It's stored
+//   verbatim in puzzles.summary and parsed by the client (parseHintPacket). Legacy
+//   rows / puzzle.json may hold a plain sentence instead — the client copes with both.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -71,19 +75,32 @@ async function fetchTitleAtRevision(wiki: string, revisionId: number | string): 
   return null;
 }
 
-// Ask Groq for a vague, spoiler-free hint. Returns "" on any failure, a leak, or
-// an out-of-bounds length. Keep this leak filter in sync with leaksTitle in
+// The title's first letter — derived in code (NOT trusted to the model) so it's always
+// exact. This is the one tier that may legitimately contain a piece of the answer, so it
+// bypasses the leak filter below.
+function firstLetterOf(title: string): string {
+  const m = String(title).match(/[A-Za-z0-9]/);
+  return m ? m[0].toUpperCase() : "";
+}
+
+// Ask Groq — in ONE call — for the layered hint packet {category, summary, first_letter}.
+// The model writes only `category` + `summary` as JSON; `first_letter` is computed here.
+// Returns a JSON STRING of the packet, or "" on any failure / when no tier is usable.
+// The per-field leak filter is kept in sync with leaksTitle in
 // scripts/lib/leak-filter.mjs (the unit-tested reference).
 async function generate(title: string, text: string): Promise<string> {
   const key = Deno.env.get("GROQ_API_KEY");
   if (!key) return "";
-  const sys = "You write a single vague, spoiler-free hint for a word-guessing game where the player "
-    + "must guess the article title. The player must NOT be able to read the answer from your hint. "
-    + "Rules: exactly one sentence, max 18 words; describe the subject only in general terms; "
+  const sys = "You write layered, spoiler-controlled hints for a word-guessing game where the player "
+    + "must guess an article title. Return ONLY a JSON object with exactly two string keys:\n"
+    + "  \"category\": 3-6 words naming the general KIND of subject (e.g. 'A fictional character', "
+    + "'A historical battle', 'A type of food'). No proper nouns.\n"
+    + "  \"summary\": one vague sentence, max 18 words, describing the subject in general terms.\n"
+    + "Rules for BOTH fields: the player must NOT be able to read the answer from them — "
     + "NEVER write the title or any of its words, names, or close variants; avoid proper nouns; "
-    + "evocative but not identifying. Output ONLY the hint sentence, nothing else.";
+    + "evocative but not identifying. Output ONLY the JSON object, nothing else.";
   const user = `Title (the answer — never mention it or its words): "${title}"\n\n`
-    + `Article excerpt:\n${String(text).slice(0, 1500)}\n\nWrite the vague hint.`;
+    + `Article excerpt:\n${String(text).slice(0, 1500)}\n\nReturn the JSON object.`;
   try {
     const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
@@ -91,18 +108,25 @@ async function generate(title: string, text: string): Promise<string> {
       body: JSON.stringify({
         model: GROQ_MODEL,
         messages: [{ role: "system", content: sys }, { role: "user", content: user }],
-        max_tokens: 60, temperature: 0.7,
+        max_tokens: 220, temperature: 0.7,
+        response_format: { type: "json_object" },
       }),
     });
     if (!r.ok) return "";
     const j = await r.json();
-    let hint = (j.choices?.[0]?.message?.content || "").trim().replace(/^["']+|["']+$/g, "").trim();
-    // leak filter: drop the hint if it contains any significant word from the title
+    const content = (j.choices?.[0]?.message?.content || "").trim();
+    let parsed: Record<string, unknown> = {};
+    try { parsed = JSON.parse(content); } catch { return ""; }
+    let category = String(parsed.category || "").trim().replace(/^["']+|["']+$/g, "").trim();
+    let summary = String(parsed.summary || "").trim().replace(/^["']+|["']+$/g, "").trim();
+    // per-field leak filter: blank ONLY the field that contains a significant title word
+    // (keep the other tiers). Mirrors leaksTitle in scripts/lib/leak-filter.mjs.
     const titleWords = String(title).toLowerCase().match(/[a-z]{3,}/g) || [];
-    const low = hint.toLowerCase();
-    if (titleWords.some((w: string) => low.includes(w))) hint = "";
-    if (hint.length < 8 || hint.length > 200) hint = "";
-    return hint;
+    const leaks = (s: string) => { const low = s.toLowerCase(); return titleWords.some((w: string) => low.includes(w)); };
+    if (category.length < 3 || category.length > 80 || leaks(category)) category = "";
+    if (summary.length < 8 || summary.length > 200 || leaks(summary)) summary = "";
+    if (!category && !summary) return "";   // nothing usable from the model
+    return JSON.stringify({ category, summary, first_letter: firstLetterOf(title) });
   } catch {
     return "";
   }

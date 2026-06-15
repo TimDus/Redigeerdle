@@ -405,9 +405,10 @@ test("daily lazily fetches a hint via the Edge Function when none is stored", as
   });
   await page.goto("/");
   await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
-  // the button is offered even though no summary is stored
-  await expect(page.locator("#summaryBtn")).toBeEnabled();
-  await page.click("#summaryBtn");
+  // the Hints button is offered even though no summary is stored
+  await expect(page.locator("#hintsBtn")).toBeEnabled();
+  await page.click("#hintsBtn");
+  await page.click('.hint-tier[data-tier="summary"] .hint-reveal');
   await expect(page.locator("#hintbox")).toContainText("A vague clue about a sport.");
   // the client sent the cache key so the function can store it once for everyone
   expect(hintBody.puzzleId).toBe("2026-06-10");
@@ -427,7 +428,8 @@ test("daily polls while the hint is pending, then shows it once ready", async ({
   });
   await page.goto("/");
   await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
-  await page.click("#summaryBtn");
+  await page.click("#hintsBtn");
+  await page.click('.hint-tier[data-tier="summary"] .hint-reveal');
   await expect(page.locator("#hintbox")).toContainText("Generating hint…");   // pending placeholder
   await expect(page.locator("#hintbox")).toContainText("Ready now.", { timeout: 10_000 });
   expect(calls).toBeGreaterThanOrEqual(2);

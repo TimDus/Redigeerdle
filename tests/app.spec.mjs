@@ -73,7 +73,7 @@ test("Give up ends the game, locks all controls, and shows in the share", async 
   await expect(page.locator("#winHead")).toHaveText("GAVE UP");
   await expect(page.locator("#winText")).toContainText("Golden Snitch");  // answer revealed
   // play + every hint control is locked
-  for (const id of ["#guess", "#go", "#revealBtn", "#summaryBtn", "#fandomBtn", "#giveUpBtn"]) {
+  for (const id of ["#guess", "#go", "#revealBtn", "#hintsBtn", "#giveUpBtn"]) {
     await expect(page.locator(id)).toBeDisabled();
   }
   await page.click("#shareBtn");
@@ -147,26 +147,45 @@ test("share text breaks down good/bad guesses, reveals and help used", async ({ 
   await page.fill("#guess", "zzzzzz"); await page.press("#guess", "Enter");   // bad (no match)
   await page.click("#revealBtn");                                             // arm a reveal
   await page.locator("#body .red.revealable").first().click();               // use 1 reveal 💡
-  await page.click("#summaryBtn");                                            // use the summary hint
+  await page.click("#hintsBtn");                                             // open the Hints panel
+  await page.click('.hint-tier[data-tier="summary"] .hint-reveal');          // reveal the summary tier
   await page.click("#shareBtn");
   const clip = await page.evaluate(() => navigator.clipboard.readText());
   expect(clip).toContain("✅ 1 good");
   expect(clip).toContain("❌ 1 bad");
   expect(clip).toContain("💡 1 reveal");
   expect(clip).not.toContain("💡 1 reveals");   // singular when exactly one
-  expect(clip).toContain("📄 summary");
+  expect(clip).toContain("📄 summary");          // the exact hint tier used, not a generic label
+  expect(clip).toMatch(/[🟩⬛]{10}/u);            // the proportional accuracy bar
 });
 
 test("used hints survive a reload (summary comes back, reflected in share)", async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
-  await page.click("#summaryBtn");
-  await expect(page.locator("#hintbox")).toBeVisible();
+  await page.click("#hintsBtn");
+  await page.click('.hint-tier[data-tier="summary"] .hint-reveal');
+  await expect(page.locator('.hint-tier[data-tier="summary"] .hint-tier-val')).toBeVisible();
   await page.reload();
   await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
-  await expect(page.locator("#hintbox")).toBeVisible();          // hint re-shown
+  // the revealed summary tier comes back on its own (panel re-rendered from saved state)
+  await expect(page.locator('.hint-tier[data-tier="summary"] .hint-tier-val')).toBeVisible();
   await page.click("#shareBtn");
   const clip = await page.evaluate(() => navigator.clipboard.readText());
   expect(clip).toContain("📄 summary");
+});
+
+test("mobile: the Hints button opens a popup with the tiers (not above the article)", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload();   // re-boot at mobile width so placeHintbox moves #hintbox into the modal
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+  // the panel is reparented into the modal body, and the popup stays closed until tapped
+  await expect(page.locator("#hintsModalBody #hintbox")).toBeAttached();
+  await expect(page.locator("#hintsmodal")).not.toHaveClass(/open/);
+  await page.click("#hintsBtn");
+  await expect(page.locator("#hintsmodal")).toHaveClass(/open/);
+  await page.click('#hintsmodal .hint-tier[data-tier="summary"] .hint-reveal');
+  await expect(page.locator('#hintsmodal .hint-tier[data-tier="summary"] .hint-tier-val')).toBeVisible();
+  await page.click("#hintsClose");   // ✕ closes it
+  await expect(page.locator("#hintsmodal")).not.toHaveClass(/open/);
 });
 
 test("sign-up rejects a password shorter than 6 characters", async ({ page }) => {

@@ -33,14 +33,33 @@ a standalone Node script run by GitHub Actions.
 - **The anon Supabase key is safe in client code**; RLS is what protects data. The
   `service_role` key is server-only (GitHub Actions secret / local `.env`) — never ship
   it to the browser.
-- **Hints are generated lazily, once, and cached.** The picker stores puzzles
-  **without** a `summary`. The first player to click "Show hint summary" triggers the
-  `hint` Edge Function, which generates via Groq and writes the result back to
-  `puzzles.summary`. Concurrent first-clickers are de-duped by an **atomic claim** on
-  `puzzles.summary_generating_at` (`UPDATE … WHERE summary IS NULL AND the claim is
-  free/stale`); the loser gets `status:"pending"` and the client polls. Random/custom
-  games call the same function with no `puzzleId` → generate, no cache. The bundled
-  [puzzle.json](puzzle.json) fallback keeps a baked-in summary for offline play.
+- **Hints are a layered packet, generated lazily (once) and cached.** A single Groq
+  call returns **all hint tiers at once** as a JSON object — `{category, summary,
+  first_letter}` — so revealing tiers never costs extra API calls (important against
+  Groq's per-minute request limit). The model writes only `category` + `summary`
+  (`response_format: json_object`); **`first_letter` is computed server-side** from the
+  authoritative title (never trusted to the model), and is the one tier the per-field
+  leak filter skips. The JSON string is stored verbatim in **`puzzles.summary`** (still a
+  `text` column — no migration) and parsed client-side (`parseHintPacket`, which also
+  copes with **legacy plain-sentence** summaries and the [puzzle.json](puzzle.json)
+  fallback by treating the whole string as the `summary` tier). The first player to
+  reveal an AI tier triggers the `hint` Edge Function, which generates via Groq and
+  writes the result back to `puzzles.summary`. Concurrent first-clickers are de-duped by
+  an **atomic claim** on `puzzles.summary_generating_at` (`UPDATE … WHERE summary IS NULL
+  AND the claim is free/stale`); the loser gets `status:"pending"` and the client polls.
+  Random/custom games call the same function with no `puzzleId` → generate, no cache.
+  **UI** ([index.html](index.html)): a single **"Hints"** button (`#hintsBtn`, next to
+  "Reveal a word") opens the `#hintbox` panel, rebuilt by **`renderHints()`** — one row
+  per tier, least→most revealing: **Category → Summary → First letter → Source**. Each
+  tier has its own **Reveal** button (`revealTier(key)`); `first_letter` is derived
+  locally (`firstLetterHint()`, instant — no fetch even if the AI hint never landed) and
+  **Source** folds in the old `showFandom` (`revealSource()` / `fandomUsed`). Which AI/
+  letter tiers were shown is tracked in **`hintTiers`** (persisted in the daily
+  localStorage state and restored into the panel); `summaryUsed` stays the rollup boolean
+  (any AI/letter tier used) for the `plays` `summary_used` column, `fandomUsed`/
+  `source_used` for **Source**. **The leak filter now runs per field** (blank only the
+  leaking tier, keep the rest) in the Edge Function — still mirrored against
+  `scripts/lib/leak-filter.mjs`.
   **Anti-poisoning**: the cached daily path does **not** trust the caller-supplied
   `title` (anyone could POST a real `puzzleId` with a bogus title to pollute the shared
   `summary` — the answer is never stored, so it can't be validated against the row).
@@ -56,6 +75,25 @@ a standalone Node script run by GitHub Actions.
   and is **mirrored** in the `hint` Edge Function
   ([supabase/functions/hint/index.ts](supabase/functions/hint/index.ts)), which runs on
   Deno and is deployed separately. Change one → change the other.
+
+## Share text (Wordle-style)
+
+The **Share** button copies a spoiler-free, emoji result via `buildShareText()` +
+`buildShareUrl()` (clipboard only — deliberately **not** `navigator.share()`, which lets
+the target rewrite the text). Three lines under the headline:
+- a **proportional 10-block accuracy bar** (`accuracyBar(good, bad)`) — 🟩 for hit
+  guesses vs ⬛ for misses, rounded to 10 blocks (each side keeps ≥1 block when it has
+  any guesses). Omitted when there are no typed guesses yet (reveals/hints only).
+- the exact counts line: `✅ N good  ❌ N bad  💡 N reveal(s)`.
+- a **per-tier hint breakdown** — one icon+label per hint actually used, in the same
+  least→most order as the Hints panel: **📂 category · 📄 summary · 🔤 first letter ·
+  🏷️ source** (`SHARE_ICON` + `HINT_TIERS`, gated on `hintTiers` / `fandomUsed`). This
+  replaced the old single generic `📄 hints` marker — when you add a hint tier, add its
+  icon to `SHARE_ICON` so it shows here too.
+
+Nothing leaked: no word lengths, no title, no fandom name — only outcomes. Keep it that
+way (the source wiki is itself a paid hint). Covered by the two share tests in
+[tests/app.spec.mjs](tests/app.spec.mjs) (the accuracy-bar regex + the exact tier label).
 
 ## Custom link & shared links — any MediaWiki
 
@@ -250,9 +288,9 @@ starts at `top:var(--header-h)` and the `.topbar` sits above it (`z-index:45`) s
 hamburger stays clickable to toggle the drawer shut. The **top card is always a pinned
 "Featured daily"** (`data-pinned`) — the featured general daily, rendered *before* the
 follows and **always shown** (never filtered out by the search box). It must **not reveal
-its fandom** — the source wiki is itself a paid hint (the **"Source"** button, `#fandomBtn`
-→ `showFandom()`/`fandomUsed`; internals keep the historical `fandom` name, the UI label and
-share text say **"Source"**) — so it uses a neutral ⭐ icon + the label
+its fandom** — the source wiki is itself a paid hint (the **Source** tier inside the
+**"Hints"** panel, `revealSource()`/`fandomUsed`; internals keep the historical `fandom`
+name, the UI label and share text say **"Source"**) — so it uses a neutral ⭐ icon + the label
 "Featured daily", not the underlying wiki's name/favicon; clicking it calls `loadPuzzle()`
 (the featured home daily). Below it the drawer reads `follows` and shows today's daily per
 followed fandom as a scrollable vertical list (icon, name, status ✓/✗/…/—).
@@ -361,26 +399,34 @@ small delta ignores scroll jitter and it never hides within 60px of the top. Lea
 width clears the class. (`--header-h` is unaffected; the left feed drawer still anchors at
 `top:var(--header-h)`.)
 
-**Mobile article top: buttons + Summary/Source output (done).** On mobile the top of the
+**Mobile article top + Hints popup (done).** On mobile the top of the
 article shows only the **Share** + **Daily metrics** buttons (`.statusbtns`); the status
-message (`#status`) is **hidden** (`.statusbar .status { display:none }`). The **Summary**
-and **Source** *output* (not their buttons — those stay in the footer) appears right under
-those buttons: both `showSummary()` and `showFandom()` append into `#hintbox`, which a JS
-`placeHintbox()` **reparents by viewport** — mobile → just after `#statusbar` (in
-`#playarea`, styled `#playarea > .hintbox`, capped `38vh` with scroll); desktop → back into
-`#controlcol` above `#history` (unchanged). CSS `order` can't move a node across containers,
-hence the reparent; it runs at boot and on the `mqMobile` `change` event, and moving the
-node keeps any already-rendered text.
+message (`#status`) is **hidden** (`.statusbar .status { display:none }`). The **Hints**
+panel (`#hintbox`, built by `renderHints()`) is shown **in a popup**, not above the
+article: the footer **Hints** button (`showHints()`) opens the `#hintsmodal` modal (same
+`.modal`/`.modal-card` pattern as How to play / Settings — ✕, backdrop-click, Esc). A JS
+`placeHintbox()` **reparents `#hintbox` by viewport** — mobile → into `#hintsModalBody`
+(inside the modal); desktop → back into `#controlcol` above `#history` (rendered inline,
+no modal). CSS `order` can't move a node across containers, hence the reparent; it runs at
+boot and on the `mqMobile` `change` event (which also closes the popup when leaving
+mobile), and moving the node keeps any already-rendered tiers. `showHints()` only opens
+the modal when `mqMobile.matches`; on desktop it just calls `renderHints()`.
 
 **Tools + guesses + guesser → sticky footer (done).** Below **`640px`** the whole
 `#controlcol` (not just the guessbar) is **`position:fixed` to the bottom of the viewport**
 as a flex column, stacked top→bottom via `order`: the **tool buttons** (`.tools` — Reveal /
-Summary / Source / Give up; **always one row** — `flex-wrap:nowrap`, the four buttons share
+Hints / Give up; **always one row** — `flex-wrap:nowrap`, the buttons share
 the width equally (`flex:1 1 0`) and their label scales with the viewport
-(`font-size:clamp(.52rem, 2.7vw, .66rem)`) so nothing wraps down to ~300px. The Reveal
-button also uses a **compact label on mobile**, `Word (N)` / `Cancel` instead of `Reveal a
-word (N left)`, set in `updateRevealBtn()` via a `matchMedia` check), the **guessed-words
-list** (`.history`, scrolls), then the
+(`font-size:clamp(.52rem, 2.7vw, .66rem)`) so nothing wraps down to ~300px; the buttons
+also carry `overflow:hidden; text-overflow:ellipsis` as a safety net so no label can ever
+spill out of the fixed footer. The Reveal
+button uses a **compact label on mobile**, `Word (N)` / `Cancel` instead of `Reveal a
+word (N left)`, set in `updateRevealBtn()` via a `matchMedia` check. **Gotcha:**
+`updateRevealBtn()` only runs once `initGame()` does — i.e. *after* the article finishes
+loading from the network — so to avoid the static full-text default flashing (and
+overflowing) during that async window, **boot sets `#revealBtn` to `"Word (3)"`
+immediately on mobile** (`if (mqMobile.matches) …`, next to `placeHintbox()`). Then the
+**guessed-words list** (`.history`, scrolls), then the
 **guesser row** (`.guessbar`). On mobile the guessbar gains a small **↑ back-to-top button**
 (`#guessTopBtn`, `.guess-top`) left of the `#guess` input (hidden on desktop via the base
 `.guess-top { display:none }`; same `scrollTo top` as the meta-row `#topBtn`), then the input,
@@ -389,8 +435,8 @@ at `3/7` of the viewport height** (`max-height:calc(100vh * 3 / 7)`); the histor
 inside that cap, and with no guesses yet the footer shrinks to just tools + guesser.
 `z-index:30` keeps it **under the modals (`50`) and the feed drawer (`35`/`40`)** so those
 still cover it when open. The `.meta` strip (counts / show-lengths / Top) is **hidden** here
-(TODO: re-home it); the `.hintbox` (Summary/Source output) is reparented to the article top
-(see above), not in the footer. A JS sync publishes `#controlcol`'s live height as
+(TODO: re-home it); the `.hintbox` (the Hints panel output) opens in the `#hintsmodal`
+popup (see above), not in the footer. A JS sync publishes `#controlcol`'s live height as
 **`--footer-h`** (a `ResizeObserver`,
 mirroring the `--header-h` one) so `.wrap`'s `padding-bottom` tracks the footer as it
 grows/shrinks and the article's tail always clears it. Note `dev-screenshot.mjs` only
@@ -505,7 +551,7 @@ solves that and also records `wiki` on every row, so later **per-fandom aggregat
   stamp `gameFinishedAt` (also persisted as `finishedAt` and restored before `checkWin`
   re-runs on resume), and `recordPlay` computes `duration_seconds` as
   `(gameFinishedAt || Date.now()) - gameStartedAt` — so a solved/given-up daily reopened
-  later in the day (or a post-finish Summary/Source click → `saveDailyState` →
+  later in the day (or a post-finish Hints reveal → `saveDailyState` →
   `recordPlay`) does **not** keep the duration ticking past the solve moment. Cadence is
   **one upsert per guess** (chosen tradeoff); debounce if write volume ever matters.
 

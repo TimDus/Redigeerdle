@@ -151,6 +151,12 @@
   .status.err { color:var(--classified); }
 
   .hintbox { display:none; font-family:var(--serif); font-style:italic; background:var(--hintbg); border-left:4px solid var(--marker); padding:10px 12px; margin:6px 0 14px; }
+  /* layered "Hints" panel: one row per tier (category / summary / first letter / source) */
+  .hint-tier { display:flex; align-items:baseline; gap:8px; margin:4px 0; font-style:normal; }
+  .hint-tier-label { font-weight:bold; min-width:88px; flex:0 0 auto; }
+  .hint-tier-val { font-style:italic; }
+  .hint-reveal { font-style:normal; font-size:.78rem; padding:2px 12px; }
+  .hint-note { font-style:normal; font-size:.78rem; opacity:.7; }
 
   .history { font-family:var(--mono); font-size:.8rem; margin:8px 0 20px; max-height:120px; overflow-y:auto; scrollbar-gutter:stable; }
   .history .row { display:flex; justify-content:space-between; padding:3px 18px 3px 0; border-bottom:1px dotted var(--line); }
@@ -217,10 +223,15 @@
       z-index:30;
     }
     #controlcol .tools { order:1; margin:0; flex:0 0 auto; gap:5px; flex-wrap:nowrap; }
-    /* always one row: the four buttons share the width equally and their label
-       scales with the viewport (clamp + vw) so nothing wraps down to ~300px. */
+    /* always one row: the buttons share the width equally and their label scales with
+       the viewport (clamp + vw) so nothing wraps down to ~300px. overflow:hidden +
+       ellipsis is a safety net so even a long label (e.g. the static "Reveal a word
+       (3 left)" shown for the split second BEFORE the article finishes loading and
+       updateRevealBtn swaps in the compact "Word (N)") is clipped, never spilling out
+       of the fixed footer. */
     #controlcol .tools button {
       flex:1 1 0; min-width:0; white-space:nowrap;
+      overflow:hidden; text-overflow:ellipsis;
       padding:6px 4px; letter-spacing:.02em;
       font-size:clamp(.52rem, 2.7vw, .66rem);
     }
@@ -239,9 +250,11 @@
        buttons stay at the top of the article. */
     .statusbar .status { display:none; }
     .statusbar { margin-bottom:8px; }
-    /* the Summary / Source OUTPUT (their buttons stay in the footer) is reparented
-       by JS to sit here, right under those buttons at the top of the article. */
-    #playarea > .hintbox { margin:8px 0 12px; max-height:38vh; overflow-y:auto; }
+    /* the Hints panel (#hintbox) is reparented by JS into the #hintsmodal popup on
+       mobile (opened by the footer "Hints" button), so it no longer sits above the
+       article. Inside the modal it shows flush (no extra margin) and scrolls with the
+       modal itself. */
+    #hintsModalBody > .hintbox { margin:0; }
   }
 
   article { font-size:1.08rem; }
@@ -513,10 +526,20 @@
         <li>Type a word and press Enter — every place that word appears in the article is revealed.</li>
         <li>Your real goal is to uncover the hidden <strong>title</strong> at the top. Crack it and you win.</li>
         <li>Stuck on a word? <strong>Reveal a word</strong> lets you click any blacked-out word in the text to expose it — you get 3 free reveals, but title words stay locked.</li>
-        <li>Need a nudge on the topic? <strong>Summary</strong> gives a spoiler-free clue, and <strong>Source</strong> reveals which wiki the article is from.</li>
+        <li>Need a nudge on the topic? <strong>Hints</strong> opens spoiler-free clues you can reveal one at a time — a category, a summary, the title's first letter, and the source wiki.</li>
         <li>A fresh <strong>Daily</strong> puzzle drops every day. In <strong>Settings</strong> you can follow your favourite fandoms (each gets its own daily) and pick which one you land on; open the <strong>☰</strong> menu to browse and play them. Want more? <strong>New game</strong> → curated, full random, a specific fandom, or your own wiki link.</li>
         <li>When you solve it (or <strong>Give up</strong>), <strong>Share</strong> your result — and check <strong>Daily metrics</strong> to see how everyone else did.</li>
       </ul>
+    </div>
+  </div>
+
+  <!-- mobile only: the Hints panel (#hintbox) is reparented into this modal body
+       (placeHintbox); on desktop it lives inline in the controls column instead. -->
+  <div class="modal" id="hintsmodal" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-label="Hints">
+      <button class="modal-x" id="hintsClose" aria-label="Close">&times;</button>
+      <h2 class="modal-title">Hints</h2>
+      <div id="hintsModalBody"></div>
     </div>
   </div>
 
@@ -554,8 +577,7 @@
     <div id="controlcol">
       <div class="tools">
         <button id="revealBtn" disabled>Reveal a word (3 left)</button>
-        <button id="summaryBtn" disabled>Summary</button>
-        <button id="fandomBtn" disabled>Source</button>
+        <button id="hintsBtn" disabled>Hints</button>
         <button id="giveUpBtn">Give up</button>
       </div>
 
@@ -622,7 +644,8 @@ has have had do does did will would can could may might so if than then there he
 who whom whose what when where why how all any some more most such into over under about
 after before between during without within up down out off`.split(/\s+/));
 
-let guesses, guessed, tokens, titleKeyWords, titleKeySet, titleStemSet, titleToks, bodyBlocks, META, hintsLeft, summaryText, revealArmed, solved, summaryUsed, fandomUsed, gaveUp;
+let guesses, guessed, tokens, titleKeyWords, titleKeySet, titleStemSet, titleToks, bodyBlocks, META, hintsLeft, hints, hintTiers, hintLoading, revealArmed, solved, summaryUsed, fandomUsed, gaveUp;
+const EMPTY_HINTS = { category: "", summary: "", first_letter: "" };
 // true when the current daily was restored as *already finished* from the server
 // (solved/gave up on another device, or as a now-merged guest) with no local guess
 // list — suppresses recordPlay/submitScore so we never clobber the real server row
@@ -834,10 +857,12 @@ function attribution(solved) {
 
 // disable play + every hint control once the game is over (win or give up)
 function lockGame() {
-  ["guess", "go", "revealBtn", "summaryBtn", "fandomBtn", "giveUpBtn"]
+  ["guess", "go", "revealBtn", "hintsBtn", "giveUpBtn"]
     .forEach(id => { document.getElementById(id).disabled = true; });
   document.getElementById("body").classList.remove("arming");
   revealArmed = false;
+  // an open hints panel: re-render so its per-tier Reveal buttons disable too
+  if (document.getElementById("hintbox").style.display === "block") renderHints();
 }
 
 function checkWin() {
@@ -960,70 +985,135 @@ function updateRevealBtn() {
     : (mobile ? "Word (" + hintsLeft + ")" : "Reveal a word (" + hintsLeft + " left)");
 }
 
-function appendHint(node) {
+/* ---- the layered "Hints" panel ----------------------------------------------
+   One button ("Hints") opens a panel of progressively-revealing tiers, least →
+   most revealing: Category → Summary → First letter → Source. Category & Summary
+   come from the AI packet (Groq, cached once per daily); First letter is derived
+   locally from the title; Source is the wiki name. Each revealed tier is tracked
+   for the share text / play-log (summaryUsed = any AI/letter tier; fandomUsed =
+   source) and persisted so a reload restores the panel. */
+const HINT_TIERS = [
+  { key: "category",     label: "Category" },
+  { key: "summary",      label: "Summary" },
+  { key: "first_letter", label: "First letter" },
+  { key: "source",       label: "Source" },
+];
+
+// the title's first letter — derived locally, so it's instant and always available
+// (no round-trip), even for a daily whose AI hint was never generated.
+function firstLetterHint() {
+  const m = String((META && META.title) || "").match(/[a-z0-9]/i);
+  return m ? m[0].toUpperCase() : "?";
+}
+
+// the Edge Function returns the layered packet as a JSON string in `summary`; legacy
+// rows / puzzle.json hold a plain sentence — coerce both into {category,summary,first_letter}.
+function parseHintPacket(raw) {
+  if (!raw) return null;
+  if (typeof raw === "object") return { ...EMPTY_HINTS, ...raw };
+  try {
+    const o = JSON.parse(raw);
+    if (o && typeof o === "object" && ("category" in o || "summary" in o || "first_letter" in o))
+      return { category: o.category || "", summary: o.summary || "", first_letter: o.first_letter || "" };
+  } catch { /* not JSON — a legacy plain-text summary sentence */ }
+  return { category: "", summary: String(raw), first_letter: "" };
+}
+
+function tierContent(key) {
+  if (key === "category") return hints.category || "(no category hint for this puzzle)";
+  if (key === "summary") return hints.summary || "(no summary for this puzzle)";
+  if (key === "first_letter") return "The title starts with “" + firstLetterHint() + "”.";
+  if (key === "source") return "Source: " + labelForHost((META.source || {}).wiki || "an unknown wiki");
+  return "";
+}
+
+// (re)build the hints panel from the current `hints` data + which tiers are revealed.
+// Idempotent — used on open, on each reveal, on restore and when the game locks.
+function renderHints() {
   const box = document.getElementById("hintbox");
-  box.appendChild(node);
+  box.textContent = "";
   box.style.display = "block";
-}
-
-function renderSummary(text) {
-  const p = document.createElement("div");
-  p.textContent = text;
-  appendHint(p);
-}
-
-async function showSummary() {
-  const btn = document.getElementById("summaryBtn");
-  // already have a hint (stored on the row, cached, or fetched earlier): show it
-  if (summaryText) {
-    renderSummary(summaryText);
-    summaryUsed = true; saveDailyState(); btn.disabled = true;
-    return;
-  }
-  // a daily with no stored hint: generate it lazily — the Edge Function caches it
-  // on the puzzle row so every player ends up sharing the same hint
-  if (currentShare.kind === "daily" && supa && dailyPuzzleId) {
-    btn.disabled = true;
-    const loading = document.createElement("div");
-    loading.textContent = "Generating hint…";
-    appendHint(loading);
-    const got = await requestDailyHint();
-    loading.remove();
-    if (got) {                       // a real hint
-      summaryText = got;
-      renderSummary(got);
-      summaryUsed = true; saveDailyState();
-    } else if (got === "") {         // ready, but this puzzle has no usable hint
-      renderSummary("(no summary provided for this puzzle)");
-      summaryUsed = true; saveDailyState();
-    } else {                         // still pending — let them try again shortly
-      btn.disabled = false;
-      setStatus("Hint isn't ready yet — try again in a moment.");
+  HINT_TIERS.forEach(t => {
+    const row = document.createElement("div");
+    row.className = "hint-tier";
+    row.dataset.tier = t.key;
+    const lab = document.createElement("span");
+    lab.className = "hint-tier-label";
+    lab.textContent = t.label;
+    row.appendChild(lab);
+    const shown = (t.key === "source") ? fandomUsed : hintTiers.includes(t.key);
+    if (shown) {
+      const v = document.createElement("span");
+      v.className = "hint-tier-val";
+      v.textContent = tierContent(t.key);
+      row.appendChild(v);
+    } else if (hintLoading === t.key) {
+      const n = document.createElement("span");
+      n.className = "hint-note";
+      n.textContent = "Generating hint…";
+      row.appendChild(n);
+    } else {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "hint-reveal";
+      b.textContent = "Reveal";
+      b.disabled = !!(solved || gaveUp);
+      b.addEventListener("click", () => revealTier(t.key));
+      row.appendChild(b);
     }
-    return;
-  }
-  // nothing to show and nothing to fetch (e.g. a random game whose hint never landed)
-  renderSummary("(no summary provided for this puzzle)");
-  summaryUsed = true; saveDailyState(); btn.disabled = true;
+    box.appendChild(row);
+  });
 }
 
-function showFandom() {
-  if (fandomUsed) { document.getElementById("fandomBtn").disabled = true; return; }  // already shown (restored / picked) — don't double-append
-  const wiki = (META.source || {}).wiki || "an unknown wiki";
-  const p = document.createElement("div");
-  p.style.fontStyle = "normal";
-  const b = document.createElement("b"); b.textContent = "Source: ";
-  p.appendChild(b);
-  p.appendChild(document.createTextNode(labelForHost(wiki)));   // the nice name (as in Settings), not the raw host
-  appendHint(p);
-  fandomUsed = true;
+// mark an AI/letter tier as revealed, sync stats/state, repaint
+function addTier(key) {
+  if (!hintTiers.includes(key)) hintTiers.push(key);
+  summaryUsed = true;
   saveDailyState();
-  document.getElementById("fandomBtn").disabled = true;
+  renderHints();
+}
+
+// reveal the source wiki (also used directly when the fandom isn't secret —
+// random-from-fandom games and known feed dailies)
+function revealSource() {
+  if (!fandomUsed) { fandomUsed = true; saveDailyState(); }
+  renderHints();
+}
+
+async function revealTier(key) {
+  if (solved || gaveUp) return;
+  if (key === "source") { revealSource(); return; }
+  if (key === "first_letter") { addTier(key); return; }
+  // category / summary: need the AI packet. Already have it → reveal immediately.
+  if (hints && hints[key]) { addTier(key); return; }
+  // a packet fetch is already in flight (the other AI tier) — wait for it rather than
+  // firing a second request; when it lands the panel re-renders with this tier ready.
+  if (hintLoading) return;
+  // a daily with no packet yet: generate it lazily — the Edge Function caches it on
+  // the puzzle row so every player ends up sharing the same hint.
+  if (currentShare.kind === "daily" && supa && dailyPuzzleId) {
+    hintLoading = key; renderHints();
+    const got = await requestDailyHint();
+    hintLoading = null;
+    if (got && typeof got === "object") hints = got;          // a real packet
+    else if (got === "") hints = hints || { ...EMPTY_HINTS };  // ready, but no usable AI hint
+    else { setStatus("Hint isn't ready yet — try again in a moment."); renderHints(); return; }  // pending
+    addTier(key);
+    return;
+  }
+  // nothing to fetch (e.g. a random game whose hint never landed) — show the placeholder
+  addTier(key);
+}
+
+function showHints() {
+  renderHints();   // builds into #hintbox (in #controlcol on desktop, in #hintsModalBody on mobile)
+  if (mqMobile.matches) document.getElementById("hintsmodal").classList.add("open");
 }
 
 function initGame(title, blocks, meta) {
   META = { ...meta, title };
-  summaryText = meta.summary || "";
+  hints = parseHintPacket(meta.summary) || { ...EMPTY_HINTS };
+  hintTiers = []; hintLoading = null;
   guesses = []; guessed = new Set(); tokens = []; hintsLeft = 3; revealArmed = false; solved = false; summaryUsed = false; fandomUsed = false; gaveUp = false; serverFinished = false;
   gameStartedAt = Date.now(); gameFinishedAt = 0;   // reset the clock; a daily resume overrides these with the saved start/finish (restoreDailyState)
   wordNav = new Map(); currentNavKey = null;   // reset history-navigation cursors for the new article
@@ -1037,8 +1127,9 @@ function initGame(title, blocks, meta) {
   const box = document.getElementById("hintbox"); box.style.display = "none"; box.textContent = "";
   document.getElementById("guess").disabled = false;
   document.getElementById("go").disabled = false;
-  document.getElementById("summaryBtn").disabled = !summaryText;
-  document.getElementById("fandomBtn").disabled = !((META.source || {}).wiki);
+  // the Hints button is always available while playing — even with no AI hint, the
+  // First letter and Source tiers can still be revealed.
+  document.getElementById("hintsBtn").disabled = false;
   document.getElementById("giveUpBtn").disabled = false;
   updateRevealBtn();
   document.getElementById("guess").focus();
@@ -1184,8 +1275,7 @@ async function loadArticle(apiBase, wikiLabel, parseParams, opts = {}) {
     currentPlayId = dailyPuzzleId;
     rememberLastDaily(wikiLabel);
     // the hint is generated lazily (once, then cached on the puzzle row) the first
-    // time a player asks — so allow the request even when no summary is stored yet.
-    if (supa && dailyPuzzleId && !opts.summary) document.getElementById("summaryBtn").disabled = false;
+    // time a player reveals it — the Hints button is already enabled in initGame.
   } else {
     // pin the exact revision so a shared link reproduces the same puzzle.
     // gameType distinguishes the non-daily flavours for the play-log/stats:
@@ -1200,36 +1290,39 @@ async function loadArticle(apiBase, wikiLabel, parseParams, opts = {}) {
   }
   setStatus(opts.statusMsg || "Article loaded — title hidden. Start guessing!");
   // when the player explicitly chose this fandom (Random from a fandom), it's no
-  // longer a secret — reveal it and disable the paid hint. The daily path reveals
-  // *after* restoreDailyState (in loadPuzzlePointer), so it can't clobber progress.
-  if (opts.revealFandom && !opts.daily) showFandom();
+  // longer a secret — reveal the source tier. The daily path reveals *after*
+  // restoreDailyState (in loadPuzzlePointer), so it can't clobber progress.
+  if (opts.revealFandom && !opts.daily) revealSource();
 }
 
-// Ask the "hint" Edge Function for a vague summary and, when it arrives, enable
-// the "Show hint summary" button. Silent no-op if Supabase/the function is absent.
+// Ask the "hint" Edge Function for the layered packet and, when it arrives, stash it
+// so the Category/Summary tiers can be revealed. Silent no-op if Supabase/the function
+// is absent. (The Hints button itself is already enabled — First letter/Source need no fetch.)
 async function fetchAndApplyHint(title, blocks) {
   if (!supa) return;
   try {
     const text = blocks.map(b => b.text).join("\n\n").slice(0, 1500);
     const { data, error } = await supa.functions.invoke("hint", { body: { title, text } });
     if (error || !data || !data.summary || solved) return;
-    summaryText = data.summary;
-    document.getElementById("summaryBtn").disabled = false;
+    hints = parseHintPacket(data.summary) || hints;
+    // if the panel is already open, repaint so the now-available tiers offer Reveal
+    if (document.getElementById("hintbox").style.display === "block") renderHints();
   } catch { /* no hint available — fine */ }
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // Lazily fetch (and let the Edge Function cache, once, on the puzzle row) the
-// daily's hint. Returns the hint text, "" when the puzzle has no usable hint
-// (ready but empty), or null when it's still pending after retries / errored.
+// daily's hint packet. Returns the parsed {category,summary,first_letter} object,
+// "" when the puzzle has no usable hint (ready but empty), or null when it's still
+// pending after retries / errored.
 async function requestDailyHint() {
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
       const { data, error } = await supa.functions.invoke("hint",
         { body: { title: META.title, text: articleText.slice(0, 1500), puzzleId: dailyPuzzleId } });
       if (error) return null;
-      if (data && data.summary) return data.summary;
+      if (data && data.summary) return parseHintPacket(data.summary);
       if (data && data.status === "pending") { await sleep(1500); continue; }
       return "";   // ready, but no usable hint for this puzzle
     } catch { return null; }
@@ -1577,6 +1670,22 @@ function buildShareUrl() {
   return base + "?p=daily";
 }
 
+// share icon for each hint tier (same least→most order as HINT_TIERS / the panel)
+const SHARE_ICON = { category: "📂", summary: "📄", first_letter: "🔤", source: "🏷️" };
+
+// a proportional 10-block accuracy bar (🟩 good vs ⬛ missed typed guesses). "" when
+// there are no typed guesses yet (reveals/hints only). Each side keeps ≥1 block when
+// it has any guesses, so a single miss/hit still shows.
+function accuracyBar(good, bad) {
+  const total = good + bad;
+  if (!total) return "";
+  let green = Math.round(good / total * 10);
+  if (good > 0 && green === 0) green = 1;
+  if (bad > 0 && green === 10) green = 9;
+  green = Math.max(0, Math.min(10, green));
+  return "🟩".repeat(green) + "⬛".repeat(10 - green);
+}
+
 function buildShareText() {
   const plural = (n, one, many) => n + " " + (n === 1 ? one : many);
   const good = guesses.filter(g => !g.hint && g.hits > 0).length;   // guesses that hit the text
@@ -1591,11 +1700,16 @@ function buildShareText() {
             : "Redigeerdle — " + plural(guesses.length, "guess", "guesses") + " in, still hunting the title.");
   // before any play and with no help used, just the teaser
   if (!gaveUp && guesses.length === 0 && !summaryUsed && !fandomUsed) return head;
-  const stats = "✅ " + good + " good  ❌ " + bad + " bad  💡 " + plural(reveals, "reveal", "reveals");
-  const helps = [];
-  if (summaryUsed) helps.push("📄 summary");
-  if (fandomUsed) helps.push("🏷️ source");
-  return head + "\n" + stats + (helps.length ? "\n" + helps.join("  ") : "");
+  const lines = [head];
+  const bar = accuracyBar(good, bad);
+  if (bar) lines.push(bar);
+  lines.push("✅ " + good + " good  ❌ " + bad + " bad  💡 " + plural(reveals, "reveal", "reveals"));
+  // break the help down per tier so the share shows exactly which hints were used
+  const helps = HINT_TIERS
+    .filter(t => t.key === "source" ? fandomUsed : hintTiers.includes(t.key))
+    .map(t => SHARE_ICON[t.key] + " " + t.label.toLowerCase());
+  if (helps.length) lines.push(helps.join("  "));
+  return lines.join("\n");
 }
 
 async function doShare() {
@@ -1919,7 +2033,7 @@ async function loadPuzzlePointer(p, { revealFandom = false } = {}) {
       featured: p.is_featured !== false,
       statusMsg });
   await restoreDailyState();
-  if (revealFandom) showFandom();   // reveal after restore so saveDailyState can't clobber progress
+  if (revealFandom) revealSource();   // reveal after restore so saveDailyState can't clobber progress
 }
 
 /* ---- persist daily progress in localStorage so a refresh resumes it ----
@@ -1936,7 +2050,9 @@ function saveDailyState() {
     localStorage.setItem(stateKey(dailyPuzzleId), JSON.stringify({
       v: 1, id: dailyPuzzleId,
       guesses: guesses.map(g => ({ word: g.word, hits: g.hits, hint: !!g.hint })),
-      hintsLeft, solved: !!solved, summaryUsed: !!summaryUsed, fandomUsed: !!fandomUsed, gaveUp: !!gaveUp,
+      hintsLeft, solved: !!solved, summaryUsed: !!summaryUsed, fandomUsed: !!fandomUsed,
+      hintTiers: (hintTiers || []).slice(),   // which AI/letter tiers were revealed (restore the panel)
+      gaveUp: !!gaveUp,
       startedAt: gameStartedAt || null,   // keep the original start so a same-day resume reports honest duration
       finishedAt: gameFinishedAt || null   // keep the frozen finish so a resume doesn't keep the clock ticking past the solve/give-up
     }));
@@ -1984,8 +2100,14 @@ async function restoreDailyState() {
   if (typeof saved.finishedAt === "number" && saved.finishedAt > 0) gameFinishedAt = saved.finishedAt;   // restore the frozen finish so the duration stays put
   draw(); refreshMeta();
   checkWin();                             // marks solved + reveals all if the saved game was won
-  if (saved.summaryUsed) showSummary();   // re-show the hints they had revealed
-  if (saved.fandomUsed) showFandom();
+  // re-show the hint tiers they had revealed (granular list; fall back to the legacy
+  // boolean which only knew "a summary was used")
+  hintTiers = Array.isArray(saved.hintTiers)
+    ? saved.hintTiers.filter(k => k !== "source")
+    : (saved.summaryUsed ? ["summary"] : []);
+  if (saved.fandomUsed) fandomUsed = true;
+  summaryUsed = hintTiers.length > 0;
+  if (hintTiers.length || fandomUsed) renderHints();
   restoring = false;
   if (saved.gaveUp && !solved) giveUp();  // restore a given-up game as ended
   updateRevealBtn();
@@ -2013,7 +2135,7 @@ async function restoreFinishedFromServer() {
     try {
       localStorage.setItem(stateKey(dailyPuzzleId), JSON.stringify({
         v: 1, id: dailyPuzzleId, guesses: [], hintsLeft,
-        solved: !!solved, summaryUsed: false, fandomUsed: false, gaveUp: !!gaveUp, startedAt: null
+        solved: !!solved, summaryUsed: false, fandomUsed: false, hintTiers: [], gaveUp: !!gaveUp, startedAt: null
       }));
     } catch { /* storage blocked — we'll just re-query the server next load */ }
   } catch { /* server unreachable — leave it playable */ }
@@ -2582,8 +2704,7 @@ document.getElementById("topBtn").addEventListener("click", () =>
 // mobile: the ↑ button left of the guess field does the same (quick scroll to top)
 document.getElementById("guessTopBtn").addEventListener("click", () =>
   window.scrollTo({ top: 0, behavior: "smooth" }));
-document.getElementById("summaryBtn").addEventListener("click", showSummary);
-document.getElementById("fandomBtn").addEventListener("click", showFandom);
+document.getElementById("hintsBtn").addEventListener("click", showHints);
 document.getElementById("giveUpBtn").addEventListener("click", () => {
   if (solved || gaveUp) return;
   if (confirm("Give up and reveal the answer? This ends the game.")) giveUp();
@@ -2619,6 +2740,11 @@ document.getElementById("helpBtn").addEventListener("click", () => {
 document.getElementById("helpClose").addEventListener("click", () => document.getElementById("helpmodal").classList.remove("open"));
 document.getElementById("helpmodal").addEventListener("click", e => {
   if (e.target.id === "helpmodal") e.currentTarget.classList.remove("open");
+});
+// hints modal (mobile only): close on the × or a backdrop click
+document.getElementById("hintsClose").addEventListener("click", () => document.getElementById("hintsmodal").classList.remove("open"));
+document.getElementById("hintsmodal").addEventListener("click", e => {
+  if (e.target.id === "hintsmodal") e.currentTarget.classList.remove("open");
 });
 // mobile drawer quick actions: close the drawer, then trigger the same action as the
 // (hidden-on-mobile) header buttons. New game / Settings / How to play.
@@ -2672,6 +2798,7 @@ document.addEventListener("keydown", e => {
   if (document.getElementById("newmodal").classList.contains("open")) { closeMenu(); setMode("daily"); }
   if (document.getElementById("settingsmodal").classList.contains("open")) closeSettings();
   document.getElementById("helpmodal").classList.remove("open");
+  document.getElementById("hintsmodal").classList.remove("open");
   document.getElementById("authmodal").classList.remove("open");
   closeMetrics();
   closeStats();
@@ -2749,23 +2876,29 @@ function onScrollHeader() {
 }
 window.addEventListener("scroll", onScrollHeader, { passive: true });
 
-/* The Summary / Source output (#hintbox — both showSummary and showFandom append
-   into it) lives in the controls column on desktop, but on mobile it belongs at the
-   TOP of the article, right under the Share / Daily-metrics buttons. CSS `order`
-   can't move it across containers, so reparent the node by viewport: mobile → just
-   after the statusbar (in #playarea); desktop → back into #controlcol above the
-   guessed-words history. Moving the node keeps any already-rendered content. */
+/* The layered Hints panel (#hintbox — built by renderHints) lives in the controls
+   column on desktop, but on mobile it goes inside the #hintsmodal popup (opened by the
+   footer "Hints" button) instead of above the article. CSS `order` can't move it across
+   containers, so reparent the node by viewport: mobile → into #hintsModalBody; desktop →
+   back into #controlcol above the guessed-words history. Moving the node keeps any
+   already-rendered content. */
 const hintboxEl = document.getElementById("hintbox");
-const statusbarEl = document.getElementById("statusbar");
 const historyEl = document.getElementById("history");
+const hintsModalBodyEl = document.getElementById("hintsModalBody");
 function placeHintbox() {
   if (mqMobile.matches) {
-    if (statusbarEl.nextElementSibling !== hintboxEl) statusbarEl.after(hintboxEl);
-  } else if (historyEl.previousElementSibling !== hintboxEl) {
-    controlColEl.insertBefore(hintboxEl, historyEl);
+    if (hintboxEl.parentElement !== hintsModalBodyEl) hintsModalBodyEl.appendChild(hintboxEl);
+  } else {
+    document.getElementById("hintsmodal").classList.remove("open");   // leaving mobile → drop the popup
+    if (historyEl.previousElementSibling !== hintboxEl) controlColEl.insertBefore(hintboxEl, historyEl);
   }
 }
 placeHintbox();
+
+// pre-load: on mobile, show the compact reveal label immediately so the static full-text
+// default ("Reveal a word (3 left)") never flashes (and overflows the fixed footer) during
+// the async article fetch — updateRevealBtn swaps in the live count once the game loads.
+if (mqMobile.matches) document.getElementById("revealBtn").textContent = "Word (3)";
 
 // react to crossing the mobile breakpoint: re-show the header and re-place the hintbox
 function onMobileMqChange() { topbarEl.classList.remove("topbar--hidden"); placeHintbox(); if (typeof META !== "undefined" && META) updateRevealBtn(); }
