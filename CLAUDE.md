@@ -39,7 +39,9 @@ a standalone Node script run by GitHub Actions.
   Groq's per-minute request limit). The model writes only `category` + `summary`
   (`response_format: json_object`); **`first_letter` is computed server-side** from the
   authoritative title (never trusted to the model), and is the one tier the per-field
-  leak filter skips. The JSON string is stored verbatim in **`puzzles.summary`** (still a
+  leak filter skips. (Both the server `firstLetterOf` and the client `firstLetterHint`
+  match a Unicode letter/number, so an accented/non-Latin title reports its real first
+  character.) The JSON string is stored verbatim in **`puzzles.summary`** (still a
   `text` column — no migration) and parsed client-side (`parseHintPacket`, which also
   copes with **legacy plain-sentence** summaries and the [puzzle.json](puzzle.json)
   fallback by treating the whole string as the `summary` tier). The first player to
@@ -67,14 +69,24 @@ a standalone Node script run by GitHub Actions.
   `wiki`+`revision_id` via MediaWiki (`fetchTitleAtRevision`) and generates from that,
   falling back to the supplied title only if the fetch fails. The function also requires
   a **valid Supabase session** (a silent anonymous guest counts) so it isn't an open,
-  unauthenticated Groq proxy — it's deployed `--no-verify-jwt` and checks the JWT in code
-  (skipped only when there's no service key to validate with). (Rate-limiting is still a
-  deploy-level concern — Supabase's anon-signin limit + a Groq dashboard cap.)
+  unauthenticated Groq proxy — it's deployed `--no-verify-jwt` and checks the JWT in code.
+  The auth gate **fails closed**: if there's no service-role key to validate the JWT *with*
+  (stripped/misconfigured deploy), it refuses to generate rather than becoming an open
+  proxy. (Per-user rate-limiting is still a deploy-level concern — Supabase's anon-signin
+  limit + a Groq dashboard cap.) Both the Groq and MediaWiki fetches use an
+  `AbortSignal.timeout`, and the daily generate-path **releases its claim**
+  (`summary_generating_at`) on any failure — so a slow/hung/failed generation can't strand
+  the row in `pending` for the whole 30s stale window.
 - The leak filter (reject an AI hint that contains a title word) lives in
   [scripts/lib/leak-filter.mjs](scripts/lib/leak-filter.mjs) (the unit-tested reference)
   and is **mirrored** in the `hint` Edge Function
   ([supabase/functions/hint/index.ts](supabase/functions/hint/index.ts)), which runs on
-  Deno and is deployed separately. Change one → change the other.
+  Deno and is deployed separately. Change one → change the other. It **folds diacritics**
+  (NFKD, strip combining marks) and matches **Unicode** letters/numbers
+  (`/[\p{L}\p{N}]{3,}/u`), NOT ASCII `[a-z]` — the app supports any-language MediaWiki, and
+  ASCII-only matching produced **zero guard words** for accented/non-Latin titles
+  (Pokémon, Cyrillic, CJK), silently letting the answer leak. Covered in
+  [tests/picker.spec.mjs](tests/picker.spec.mjs).
 
 ## Share text (Wordle-style)
 
@@ -91,9 +103,42 @@ the target rewrite the text). Three lines under the headline:
   replaced the old single generic `📄 hints` marker — when you add a hint tier, add its
   icon to `SHARE_ICON` so it shows here too.
 
+- a **score line** — `🎯 Score N (lower is better)` (see **Score** below).
+
 Nothing leaked: no word lengths, no title, no fandom name — only outcomes. Keep it that
 way (the source wiki is itself a paid hint). Covered by the two share tests in
 [tests/app.spec.mjs](tests/app.spec.mjs) (the accuracy-bar regex + the exact tier label).
+
+## Score (lower is better)
+
+A golf-style score: **the goal is the lowest total**. A correct typed guess is free
+(`+0`); every bit of help adds points — **wrong guess `+1`, free word reveal `+5`, the
+**source** / **summary** / **category** hint tiers `+10` each, the **first-letter** tier
+`+20`. The point values live in the `SCORE` map and `computeScore()` derives the total
+**purely from the same play state the share line uses** (`guesses` → bad/reveal counts,
+`hintTiers`, `fandomUsed`) — so the live pill, the share text and the win/give-up banner
+can never disagree (no separately-tracked counter to drift). `computeScore()` is defined
+next to `buildShareText()`.
+
+Shown **live** in a `#scorePill` (`Score: <b id="scoreVal">`) in the `.statusbar` — visible
+on both desktop and mobile (the status *message* is hidden on mobile, but the pill stays).
+`updateScore()` repaints it and is called from **`refreshMeta()`** (every guess/reveal) and
+**`renderHints()`** (every hint-tier reveal), so it tracks in real time. It also lands in
+the **share text** (`buildShareText`) and the **win / give-up banner** (`checkWin`/`giveUp`).
+When you add a new hint tier or paid action, add its cost to `SCORE`.
+
+**Persisted for stats**: `recordPlay()` writes `computeScore()` into the **`plays.score`**
+column (migration `20260615120000_add_plays_score.sql`, nullable — pre-column rows just
+have no score and the aggregates ignore NULLs). It surfaces in two stats places:
+**My stats** shows an **"Avg score"** tile (over *solved* games) in both the Dailies and
+Free play sections — with the source selector this gives **avg score per fandom**; and the
+**Daily metrics** modal shows an **"Avg score"** card via `daily_metrics`, which gained an
+`avg_score` return column (migration `20260615120100_daily_metrics_avg_score.sql` — note it
+must **`drop function` then recreate**, since Postgres won't `CREATE OR REPLACE` a changed
+return type). Avg-score is over solved plays only, mirroring `avg_guesses` ("to complete").
+**Deploy ordering**: the client references `plays.score`, so the migrations must be pushed
+**before** the updated `index.html` ships — otherwise every `plays` upsert (and the My-stats
+query) fails on the unknown column.
 
 ## Custom link & shared links — any MediaWiki
 
@@ -125,6 +170,124 @@ shared `?wiki=&rev=` link**. So none of it is ever put into the DOM via `innerHT
 becomes an `href` goes through `safeHttpUrl()` (only `http(s):` — no `javascript:`/`data:`).
 The article body is already safe (parsed with `DOMParser`, which doesn't run scripts, and
 emitted as `textContent` tokens). Keep new wiki-derived text out of `innerHTML`.
+
+## Multiplayer — co-op & versus (`mp`)
+
+Two realtime modes, both built on the **`mp`** module in [index.html](index.html) (a single
+`const mp = {…}` object just above the `boot()` IIFE) over **Supabase Realtime** (broadcast +
+presence — already bundled in `supabase-js@2`, otherwise unused). **Requires a real
+(non-anonymous) account** — gated on `isRealUser()`; guests are nudged to sign in.
+
+- **Co-op (samen):** everyone shares **one board**. A local typed guess broadcasts a `guess`
+  event (in `applyGuess`, guarded by `mp.active && mp.mode==="coop" && !remote && !isHint`); a
+  free-word reveal broadcasts `reveal` (in `handleBodyClick`); a revealed hint tier broadcasts
+  `hint {tier, packet}` (in `addTier`/`revealSource`). Incoming events are applied with
+  `applyGuess(…, /*remote*/true)` so they **never re-broadcast** (no echo loop). The hint
+  **packet travels verbatim**, so a teammate revealing a tier costs **no extra Groq call**
+  (respects the per-minute limit). **Every** co-op guess is credited via `g.by` (your own name
+  for local guesses — `mpName()` — the sender's for remote ones via `mp._incomingBy`); the
+  history row groups the hit-count + name in a right-aligned `.rmeta` span (name last) so the
+  count never floats in the middle, all via `textContent` (never `innerHTML`). A late joiner
+  asks the host for the current board with `sync-req` → host replays `sync`. **Give-up is shared:**
+  `giveUp()` broadcasts `giveup` (co-op) so a teammate's give-up ends the game for everyone
+  (`_applyRemoteGiveUp` → `giveUp()` with `_remoteGiveUp` set to suppress the echo). A solve is
+  already shared — the winning guess is a broadcast `guess`, so every client's `checkWin` fires.
+- **Versus (tegen elkaar):** under **New game**. The **host** creates the room and presses
+  **Play** (`mp.startMatch()` → broadcasts `start {startAt}` and sets `gameStartedAt = now`, so
+  **the timer only begins at Play**, not at article load). Everyone else waits behind the
+  **`#mpWaiting`** overlay (input disabled) until `start`, then adopts the shared `startAt` as
+  `gameStartedAt` (fair clock). The host's invite **Copy** button lives inside that overlay
+  (`#mpWaitCopyBtn`) — the overlay covers `#mpPanel`, so the panel's button is unreachable while
+  waiting. Each player has their **own** board; live progress flows through **presence**
+  (`mp.publishProgress()` re-`track()`s `{pct,guesses,score,solved,gaveUp}` on every `refreshMeta`),
+  rendered as a **standings** list (`#mpStandings`, sorted by solved then score), first solver
+  flagged 🏁. Logged-but-not-yet on a leaderboard. **Keeping standings live:** `_connect` listens
+  to presence **`sync` AND `join`/`leave`** (a peer's re-`track()` can surface as join/leave, not
+  only sync — listening to all three is what stops opponents' stats freezing after join);
+  `_enterRoom` re-`track()`s once the article's loaded; and `publishProgress` repaints your OWN
+  row too (presence echoes don't return to the sender).
+
+The in-game HUD (`#mpPanel`, docked at the top of `#controlcol`) shows a **"Copy invite link"**
+button (`#mpCopyBtn` — **no raw link text** anywhere, per user pref; the URL goes to the clipboard
+via `mp.inviteUrl()`) plus the roster/standings. The versus waiting overlay (`#mpWaiting`) has its
+own `#mpWaitCopyBtn`. Verified in-game on desktop+mobile with screenshots (the footer-capped mobile
+layout stays readable with the slim copy button). **Layout note:** the desktop `#playarea` grid
+uses `grid-template-rows:min-content 1fr` — the controls column spans both rows, so a tall controls
+column (hints open + standings) over a short article would otherwise stretch the status row and
+leave a big gap under the status bar; pinning the status row and letting the article row (1fr)
+absorb the slack keeps the article flush under the status bar.
+
+**Core invariant:** a room persists **nothing** server-side — no tables, no RLS, no migration.
+Only the article **pointer** (`wiki`+`rev`, exactly what `?g=` carries) + gameplay events ride
+the ephemeral channel, so "the answer/article text is never stored" still holds.
+
+**Protocol/transport.** One channel per room: `supa.channel("room:"+roomId, {broadcast:{self:
+false}, presence:{key:userId}})`. **Two Supabase Realtime limits shaped this design** (Free *and*
+Pro — see [[supabase-realtime-limits]]):
+- **Broadcast `{event:"*"}` is unreliable** in supabase-js (the wildcard often never fires). So
+  every event is bound **per name** from `MP_EVENTS` (`ch.on("broadcast",{event:ev},…)`). Using
+  `"*"` is what left guests stuck — the host's reply never reached them.
+- **Presence `track()` is capped at 5 calls / 30s per client.** So presence carries **membership
+  only** (`_presenceMeta` = `{userId,name,role}`, + the host's `cfg:{mode,wiki,rev,started,
+  startAt}`), tracked sparingly (subscribe, enter, startMatch). **Live versus progress goes over
+  BROADCAST** (`progress` event, `publishProgress` on every `refreshMeta`; broadcast allows 100
+  msg/s) — NOT presence. Publishing progress via presence per-guess (the old approach) blew the
+  5/30s cap and silently froze opponents' stats. `_applyProgress` merges a peer's broadcast
+  progress onto their presence membership in `mp.peers`.
+
+A joiner learns the mode + article via an **explicit broadcast handshake**: on subscribe the guest
+sends `hello` (retried ~every 1.5s until entered, `_startHello`), the host replies `config` (→
+`_enterRoom`); the host also re-sends `config` when a new peer appears in presence (backstop).
+Presence-cfg is a secondary fallback. Until the config lands the guest's mode is unknown, so the
+HUD shows **"Joining…"** (not a "Co-op" mislabel), and `mpLivePct()`/`_selfMeta()` tolerate
+uninitialised `tokens`/`guesses` (no article yet). A `CHANNEL_ERROR`/`TIMED_OUT` subscribe status
+(Realtime unreachable/disabled) is surfaced to the user instead of a forever "Joining…".
+Transport is behind `mp.send(event,payload)` / `mp._recv(event,payload)` / `mp._recvPresence(
+roster)` so it's **test-injectable**: `window.__MP_FAKE_TX = true` skips the real channel, the
+page acts as the local peer, and tests simulate the *remote* peer by calling `mp._recv` /
+`mp._recvPresence` (and assert outgoing events in `mp._sent`).
+
+**Event role-gating (anti-griefing).** Broadcast events carry no verified sender, so host→guest
+events are gated by the *receiver's* role: `_applyStart` and `_applySync` early-return when
+`role === "host"` (a peer can't spoof a `start` to force-begin the host's clock, or push a `sync`
+to overwrite the host's authoritative board); `config` is already `guest && !entered`-gated and
+`cancel` is host-returns-early. `guess`/`reveal`/`hint`/`giveup` (co-op shared board) and
+`progress` (versus, own stats) stay open to any participant by design. This is defence-in-depth
+for an invited-friends room, **not** cryptographic auth — a determined peer with the link can't be
+fully stopped without a server referee.
+
+**Entry points / routing.** New game modal has **Co-op** / **Versus** cards (`#coopBtn`/
+`#versusBtn` → `chooseMpMode()` sets `pendingMpMode`); after the chosen article loads,
+`loadArticle` calls `mp.createRoom(pendingMpMode)`. An **"Invite (co-op)"** button (`#inviteBtn`,
+next to Share) is shown to a real user whenever **any** article is loaded and you're not already
+in a room (`updateInviteBtn` derives the rev from `currentShare.rev || META.source.revision_id`,
+so it works on a daily too); it `createRoom("coop")`s around the **current** article, keeping your
+progress. `createRoom` normalises `currentShare` to a plain custom pointer (clears `dailyPuzzleId`/
+`dailyFeatured`/`dailyDate`) so converting a daily isn't scored/replay-blocked. **Versus host can
+cancel** before starting (`#mpCancelBtn` → `cancelMatch()` broadcasts `cancel` then `leaveRoom`;
+guests get `_applyCancel` → released to solo). A **`?room=<id>`** link joins: `boot()` detects it, gates behind sign-in
+(`needSignIn()` + `#authJoinNote`) when not a real user, and `consumePendingRoom()` (from `onAuth`)
+joins once signed in. **Stats:** finished co-op/versus games log to `plays` with new
+`game_type`s **`coop`/`versus`** (no migration — `game_type` is free `text`; `currentShare.
+gameType` is set by `createRoom`/`_enterRoom`); they surface in My stats as **Free play** rows. **Converting a DAILY to co-op is different**: it must stay in
+*daily* stats, so `createRoom` keeps its daily identity (game_type `featured_daily`/`fandom_daily`,
+same `puzzle_id`, replay-block) and instead flags **`plays.coop = true`** (migration
+[20260615130000_add_plays_coop.sql](supabase/migrations/20260615130000_add_plays_coop.sql) — a
+nullable-safe `boolean default false`; **push before shipping the client**, like `plays.score`). The
+co-op flag is sticky via `mpCoopPlay` (reset in `initGame`, set in `createRoom`/`_enterRoom`,
+**persisted in the daily localStorage state** so a same-day reload keeps it after the ephemeral room
+is gone). A co-op solve is **not** submitted to the competitive `scores` leaderboard
+(`submitScore` early-returns on `mpCoopPlay`) — it still counts in personal daily stats + the
+`daily_metrics` completion aggregate. My stats → Dailies shows a **"Co-op"** tile (10 tiles now);
+`aggregate()` returns `coopCount`. A random/custom co-op game needs no flag — it's already isolated
+by `game_type='coop'`.
+
+**Tests:** [tests/multiplayer.spec.mjs](tests/multiplayer.spec.mjs) — the sign-in gate, co-op
+guess/hint/reveal propagation (+ the `by` tag), the versus waiting→start gate, presence standings,
+the `coop` `game_type` log, and the invite URL. Fully hermetic via `window.__MP_FAKE_TX`. **Not**
+covered (no live Realtime in CI): the true cross-client socket path — smoke-test that in two
+signed-in browser windows after deploy, and confirm Realtime is enabled in the Supabase dashboard
+(broadcast/presence are on by default; no Postgres CDC / publication needed — we use no tables).
 
 ## Key files
 
@@ -235,6 +398,9 @@ the header.
   0-guess clobber (asserts no `plays` POST fires — the `serverFinished` guard).
 - [tests/picker.spec.mjs](tests/picker.spec.mjs) — pure-function unit tests for the
   picker. Imports the exported helpers; no browser, no network.
+- [tests/multiplayer.spec.mjs](tests/multiplayer.spec.mjs) — co-op + versus (`mp`). Drives the
+  real DOM as the local peer and simulates the remote peer via `mp._recv`/`mp._recvPresence`
+  (`window.__MP_FAKE_TX` skips the live channel). See **Multiplayer** above.
 
 **Conventions:** mock Supabase by routing `**/rest/v1/<table>**`. `.maybeSingle()`
 queries: return `[]` for "no row" or `[{...}]` and supabase-js reads element 0.
@@ -314,7 +480,10 @@ dailies roll over at local (Europe/Amsterdam) midnight, `last.day` no longer mat
 fall through to the **homepage daily** (`homeDailyPref` → `loadDailyForWiki(home)`, or the
 featured daily). So: reload mid-day → same puzzle you were on; first visit of a new day →
 your configured homepage daily. (`?p=daily` still forces the featured daily regardless;
-`?d=` shared links still open that fandom's daily directly.)
+`?d=` shared links still open that fandom's daily directly.) Boot also runs
+`pruneOldDailyState()`, which drops `redigeerdle:daily:<id>` keys whose embedded date is
+older than ~60 days, so per-day/per-fandom progress state doesn't grow `localStorage`
+without bound (best-effort; unparseable keys are left alone).
 
 Header layout: three groups — the **hamburger** (`#feedBtn`, opens the daily-feed drawer)
 at the far left, the **brand** (`.brand` — title + **New game** + **How to play**) above
@@ -510,9 +679,11 @@ solves that and also records `wiki` on every row, so later **per-fandom aggregat
   `using (true)`. The first such RPC is **`daily_metrics(p_puzzle_id)`**
   ([migration](supabase/migrations/20260614012445_add_daily_metrics_rpc.sql)): it
   aggregates `plays` for **one daily** (keyed by `puzzle_id`, so date-sharing fandoms
-  don't blur) and returns `{players, solved, completion_pct, avg_guesses, avg_seconds}`
-  — `players` = everyone with a row for that puzzle (the completion-% denominator);
-  `avg_guesses`/`avg_seconds` are over **solved** plays only ("to complete"). `EXECUTE`
+  don't blur) and returns `{players, solved, completion_pct, avg_guesses, avg_seconds,
+  avg_score}` — `players` = everyone with a row for that puzzle (the completion-%
+  denominator); `avg_guesses`/`avg_seconds`/`avg_score` are over **solved** plays only
+  ("to complete"; `avg_score` added in
+  [migration](supabase/migrations/20260615120100_daily_metrics_avg_score.sql)). `EXECUTE`
   is revoked from `public` and re-granted to `anon`/`authenticated` (logged-out players
   see the stats too). Broader per-fandom aggregates (`GROUP BY wiki`) can follow the same
   pattern.
@@ -522,8 +693,8 @@ solves that and also records `wiki` on every row, so later **per-fandom aggregat
   `fandom_daily` / `full_random` / `curated_random` / `fandom_random` / `custom`),
   `wiki`, `puzzle_date`/`puzzle_id` (dailies only), `revision_id`, `total_guesses`,
   `good_guesses` (typed, ≥1 hit), `wrong_guesses` (typed, 0 hits), `reveals` (paid
-  free-word reveals), `revealed_pct`, `summary_used`, `source_used`, `gave_up`,
-  `solved`, `started_at`, `duration_seconds`.
+  free-word reveals), `score` (the golf score — see **Score** above), `revealed_pct`,
+  `summary_used`, `source_used`, `gave_up`, `solved`, `started_at`, `duration_seconds`.
 - **`game_type`** comes from `currentShare.gameType`, set in `loadArticle` (dailies:
   `opts.featured ? featured_daily : fandom_daily`; the random/curated callers pass
   `full_random`/`curated_random`/`fandom_random`; everything else = `custom`).
@@ -583,17 +754,18 @@ anonymous account); the modal shows a "Sign in to keep your stats across devices
   hint, same invariant as the feed's pinned card). Changing it re-renders from the cached
   `statsRows` (no refetch). `statsSource` persists across opens; resets to Combined if the
   saved source vanishes from the data.
-- **Dailies** (`featured_daily` + `fandom_daily`, `DAILY_TYPES`/`isDailyRow`): 8 tiles —
+- **Dailies** (`featured_daily` + `fandom_daily`, `DAILY_TYPES`/`isDailyRow`): 9 tiles —
   Played, Solved %, Current/Best streak, Avg guesses (over **solved**), Avg time, Clean
   solves (solved with **no reveals, no summary, no source** — our analogue of Jaardle's
-  "perfect"), Gave up — plus the heatmap.
+  "perfect"), Gave up, **Avg score** (over **solved**, lower is better) — plus the heatmap.
 - **Free play** (`full_random` / `curated_random` / `fandom_random` / `custom`): the same
   tiles **minus the two streak tiles** (streaks are a daily concept), no heatmap.
 - Each section shows "No daily/free play games yet." when the scoped set is empty (e.g. the
   "Featured daily" source has no free play).
 
 **Shared helpers:** `aggregate(rows)` → played/solved/winPct/gaveUp/clean/avgGuesses/
-avgSeconds for either section; `dailyStreaks(dailyRows)` → consecutive calendar days with a
+avgSeconds/avgScore (avgScore over **solved** rows that have a `score`) for either section;
+`dailyStreaks(dailyRows)` → consecutive calendar days with a
 **solved daily** (current counts back from today, or yesterday if today isn't solved yet so
 an unplayed today doesn't break it; best is the longest run); `heatmapHTML(dailyRows)` → a
 119-day (17-week) contribution grid (green `.cell.solved` = solved a daily that day, red
@@ -637,10 +809,14 @@ anonymous auth**. This needs **"Allow anonymous sign-ins" enabled in the dashboa
   guests too — that's the whole point.
 - **Merge on sign-in** (handles the "played a week as guest, then sign into an existing
   account" case): before any sign-in, `captureAnonForMerge()` snapshots the guest
-  `{id, access_token}` into `localStorage` (`redigeerdle:anonmerge`). After `onAuth` sees
+  `{id, access_token, at}` into `localStorage` (`redigeerdle:anonmerge`). After `onAuth` sees
   a **real** user with a different saved guest id, `maybeMergeAnon()` invokes the
-  **`merge-anon` Edge Function** ([supabase/functions/merge-anon/index.ts](supabase/functions/merge-anon/index.ts)),
-  then clears the marker. **One uniform path** for new *and* existing accounts (a brand-new
+  **`merge-anon` Edge Function** ([supabase/functions/merge-anon/index.ts](supabase/functions/merge-anon/index.ts)).
+  It clears the marker **only on a confirmed merge** (no `{error}` and no throw) — a transient
+  failure keeps it so the next sign-in retries (silently dropping a guest's plays is worse than
+  one extra best-effort call); the retry is bounded by the snapshot's `at` timestamp (dropped
+  once older than ~55 min, since the guest access token has expired by then and a merge can't
+  succeed). **One uniform path** for new *and* existing accounts (a brand-new
   account is empty → no conflicts) — so we **don't** use `linkIdentity`/manual-linking.
 - **`merge-anon`** validates two proofs — the caller's real JWT (Authorization header;
   deploy with **JWT verification ON**, i.e. *no* `--no-verify-jwt`) and the guest's

@@ -64,7 +64,7 @@ async function fetchTitleAtRevision(wiki: string, revisionId: number | string): 
   const cands = [...new Set([withPath + "/api.php", root + "/w/api.php", root + "/api.php"])];
   for (const base of cands) {
     try {
-      const r = await fetch(base + "?action=query&revids=" + encodeURIComponent(String(revisionId)) + "&formatversion=2&format=json");
+      const r = await fetch(base + "?action=query&revids=" + encodeURIComponent(String(revisionId)) + "&formatversion=2&format=json", { signal: AbortSignal.timeout(8000) });
       if (!r.ok || !((r.headers.get("content-type") || "").includes("json"))) continue;
       const j = await r.json();
       const pages = j?.query?.pages;
@@ -77,10 +77,17 @@ async function fetchTitleAtRevision(wiki: string, revisionId: number | string): 
 
 // The title's first letter — derived in code (NOT trusted to the model) so it's always
 // exact. This is the one tier that may legitimately contain a piece of the answer, so it
-// bypasses the leak filter below.
+// bypasses the leak filter below. Match a Unicode letter/number (\p{L}\p{N}), not just
+// ASCII, so an accented/non-Latin title ("Élan", "東京") reports its real first character.
 function firstLetterOf(title: string): string {
-  const m = String(title).match(/[A-Za-z0-9]/);
+  const m = String(title).match(/[\p{L}\p{N}]/u);
   return m ? m[0].toUpperCase() : "";
+}
+
+// Fold accents/diacritics + lowercase, mirroring scripts/lib/leak-filter.mjs (the
+// unit-tested reference). Kept in sync by hand — change one, change the other.
+function foldText(s: string): string {
+  return String(s).normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase();
 }
 
 // Ask Groq — in ONE call — for the layered hint packet {category, summary, first_letter}.
@@ -111,6 +118,10 @@ async function generate(title: string, text: string): Promise<string> {
         max_tokens: 220, temperature: 0.7,
         response_format: { type: "json_object" },
       }),
+      // bound a slow/hung Groq so we don't hold the daily's generation claim (and the
+      // request) until the platform wall-clock kill — on timeout this throws, the catch
+      // returns "", and the daily path then releases the claim for a later retry.
+      signal: AbortSignal.timeout(12000),
     });
     if (!r.ok) return "";
     const j = await r.json();
@@ -120,9 +131,11 @@ async function generate(title: string, text: string): Promise<string> {
     let category = String(parsed.category || "").trim().replace(/^["']+|["']+$/g, "").trim();
     let summary = String(parsed.summary || "").trim().replace(/^["']+|["']+$/g, "").trim();
     // per-field leak filter: blank ONLY the field that contains a significant title word
-    // (keep the other tiers). Mirrors leaksTitle in scripts/lib/leak-filter.mjs.
-    const titleWords = String(title).toLowerCase().match(/[a-z]{3,}/g) || [];
-    const leaks = (s: string) => { const low = s.toLowerCase(); return titleWords.some((w: string) => low.includes(w)); };
+    // (keep the other tiers). Mirrors leaksTitle in scripts/lib/leak-filter.mjs — folds
+    // diacritics and matches Unicode letters/numbers, so an accented/non-Latin title
+    // (Pokémon, Cyrillic, CJK) is actually guarded instead of silently producing 0 words.
+    const titleWords = foldText(title).match(/[\p{L}\p{N}]{3,}/gu) || [];
+    const leaks = (s: string) => { const low = foldText(s); return titleWords.some((w: string) => low.includes(w)); };
     if (category.length < 3 || category.length > 80 || leaks(category)) category = "";
     if (summary.length < 8 || summary.length > 200 || leaks(summary)) summary = "";
     if (!category && !summary) return "";   // nothing usable from the model
@@ -140,12 +153,17 @@ Deno.serve(async (req) => {
 
     const admin = adminClient();
 
-    // Require a valid Supabase session (a silent anonymous guest counts) so this
-    // Groq-backed endpoint isn't an open, unauthenticated proxy that any script can hit
-    // to burn the server-side Groq quota. supabase-js attaches the caller's JWT
-    // automatically; we deploy with --no-verify-jwt and check it here so the no-DB
-    // degrade path still works. Skipped only when we have no service key to validate with.
-    if (admin) {
+    // Auth gate — FAIL CLOSED. This Groq-backed endpoint must never be an open,
+    // unauthenticated proxy that any script can hit to burn the server-side Groq quota.
+    // We require a valid Supabase session (a silent anonymous guest counts), validated
+    // with the service-role client. supabase-js attaches the caller's JWT automatically;
+    // we deploy --no-verify-jwt (the platform does NO auth), so this is the ONLY gate.
+    // If there's no service key to validate WITH (stripped/misconfigured deploy), we
+    // refuse rather than generate — a missing/rotated secret must not silently open the
+    // proxy. (Rate-limiting the authenticated surface stays a deploy concern: the Groq
+    // dashboard cap + Supabase's anon-signin limit.)
+    if (!admin) return json({ summary: "", status: "ready" });
+    {
       const authHeader = req.headers.get("Authorization") || "";
       const jwt = authHeader.replace(/^Bearer\s+/i, "").trim();
       const { data: who } = jwt ? await admin.auth.getUser(jwt) : { data: null };
@@ -153,7 +171,7 @@ Deno.serve(async (req) => {
     }
 
     // ---- random/custom games: no row to cache against, just generate ----
-    if (!puzzleId || !admin) {
+    if (!puzzleId) {
       return json({ summary: await generate(title, text), status: "ready" });
     }
 
@@ -186,15 +204,26 @@ Deno.serve(async (req) => {
       // 3) we own the claim → generate and write back. Re-derive the title from the
       //    pinned revision so a caller-supplied (possibly poisoned) title can't pollute
       //    the shared cache; fall back to the supplied title only if the fetch fails.
-      const authTitle = await fetchTitleAtRevision(row?.wiki, row?.revision_id);
-      const hint = await generate(authTitle || title, text);
-      if (hint) {
-        await admin.from("puzzles").update({ summary: hint }).eq("id", puzzleId);
-        return json({ summary: hint, status: "ready" });
+      //    Release the claim on ANY failure (the title fetch, the generation, OR the
+      //    write-back rejecting) so a single failed attempt doesn't strand the row in
+      //    "pending" for the whole 30s stale window.
+      try {
+        const authTitle = await fetchTitleAtRevision(row?.wiki, row?.revision_id);
+        const hint = await generate(authTitle || title, text);
+        if (hint) {
+          await admin.from("puzzles").update({ summary: hint }).eq("id", puzzleId);
+          return json({ summary: hint, status: "ready" });
+        }
+        // no usable hint → release the claim so a later click can retry.
+        await admin.from("puzzles").update({ summary_generating_at: null }).eq("id", puzzleId);
+        return json({ summary: "", status: "ready" });
+      } catch (genErr) {
+        // generation/write failed after we claimed — free the claim (best-effort), then
+        // fall through to the outer degrade path (generate uncached so the caller still
+        // gets a hint this time).
+        await admin.from("puzzles").update({ summary_generating_at: null }).eq("id", puzzleId).then(() => {}, () => {});
+        throw genErr;
       }
-      // no usable hint → release the claim so a later click can retry.
-      await admin.from("puzzles").update({ summary_generating_at: null }).eq("id", puzzleId);
-      return json({ summary: "", status: "ready" });
     } catch {
       // DB path unavailable (e.g. migration not applied yet) → degrade gracefully:
       // generate without caching, so the feature still works.

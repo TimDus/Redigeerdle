@@ -1,0 +1,12 @@
+-- ============================================================================
+--  plays.score: the golf-style score for a game (lower is better).
+--
+--  A correct typed guess is free (+0); every bit of help adds points — wrong
+--  guess +1, free word reveal +5, the source/summary/category hint tiers +10
+--  each, the first-letter tier +20. Computed client-side (computeScore() in
+--  index.html) from the same play state the share line uses, and written by
+--  recordPlay() on every snapshot. Nullable: rows logged before this column
+--  existed have no score, so the stats aggregates ignore NULLs (avg over the
+--  rows that have a score).
+-- ============================================================================
+alter table public.plays add column if not exists score int;

@@ -34,7 +34,7 @@ const routeRest = async page => {
   // the daily-metrics aggregate RPC — return a fixed aggregate
   await page.route("**/rest/v1/rpc/daily_metrics**", r =>
     r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(
-      [{ players: 8, solved: 6, completion_pct: 75, avg_guesses: 12.5, avg_seconds: 134 }]) }));
+      [{ players: 8, solved: 6, completion_pct: 75, avg_guesses: 12.5, avg_seconds: 134, avg_score: 7.5 }]) }));
 };
 
 test("loads the daily from Supabase (not the bundled fallback)", async ({ page }) => {
@@ -61,11 +61,12 @@ test("daily metrics render the anonymous aggregate stats (no per-player leaderbo
 
   // aggregate stat cards from the daily_metrics RPC (players, completion %, avg guesses, avg time)
   const cards = page.locator("#metricsStats .stat");
-  await expect(cards).toHaveCount(4);
+  await expect(cards).toHaveCount(5);
   await expect(cards.nth(0)).toContainText("8");        // players
   await expect(cards.nth(1)).toContainText("75%");      // completion
   await expect(cards.nth(2)).toContainText("12.5");     // avg guesses
   await expect(cards.nth(3)).toContainText("2m 14s");   // 134s → 2m 14s
+  await expect(cards.nth(4)).toContainText("7.5");      // avg score (lower is better)
 
   // the per-player ranked leaderboard is gone — only the anonymous aggregate remains
   await expect(page.locator("#metricsList .mrow")).toHaveCount(0);
@@ -161,6 +162,7 @@ test("recordPlay logs a finished daily to plays with game_type + good/wrong/reve
     revision_id: 2006074,                       // the pinned oldid played
     total_guesses: 3, good_guesses: 2, wrong_guesses: 1, reveals: 0,
     summary_used: false, source_used: false, gave_up: false, solved: true,
+    score: 1,                                   // 1 wrong guess (+1); good guesses are free
   });
   // duration + completion: derived fields are present and sane
   expect(typeof row.started_at).toBe("string");
@@ -203,11 +205,11 @@ test("My stats splits dailies vs free play, filters by source, keeps featured ne
   const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Amsterdam" }).format(new Date());
   const minus = n => { const [y, m, d] = today.split("-").map(Number); const dt = new Date(Date.UTC(y, m - 1, d, 12)); dt.setUTCDate(dt.getUTCDate() - n); return dt.toISOString().slice(0, 10); };
   const fixture = [
-    { game_type: "featured_daily", wiki: "harrypotter.fandom.com", puzzle_date: today,    total_guesses: 40, reveals: 0, summary_used: false, source_used: false, gave_up: false, solved: true,  duration_seconds: 300 },
-    { game_type: "featured_daily", wiki: "harrypotter.fandom.com", puzzle_date: minus(1),  total_guesses: 50, reveals: 2, summary_used: false, source_used: false, gave_up: false, solved: true,  duration_seconds: 600 },
-    { game_type: "featured_daily", wiki: "harrypotter.fandom.com", puzzle_date: minus(2),  total_guesses: 30, reveals: 0, summary_used: false, source_used: false, gave_up: true,  solved: false, duration_seconds: 120 },
-    { game_type: "fandom_daily",   wiki: "minecraft.wiki",         puzzle_date: minus(1),  total_guesses: 20, reveals: 0, summary_used: false, source_used: false, gave_up: false, solved: true,  duration_seconds: 200 },
-    { game_type: "full_random",    wiki: "en.wikipedia.org",       puzzle_date: null,      total_guesses: 10, reveals: 0, summary_used: false, source_used: true,  gave_up: true,  solved: false, duration_seconds: 90 },
+    { game_type: "featured_daily", wiki: "harrypotter.fandom.com", puzzle_date: today,    total_guesses: 40, reveals: 0, summary_used: false, source_used: false, gave_up: false, solved: true,  duration_seconds: 300, score: 5, coop: true },
+    { game_type: "featured_daily", wiki: "harrypotter.fandom.com", puzzle_date: minus(1),  total_guesses: 50, reveals: 2, summary_used: false, source_used: false, gave_up: false, solved: true,  duration_seconds: 600, score: 15 },
+    { game_type: "featured_daily", wiki: "harrypotter.fandom.com", puzzle_date: minus(2),  total_guesses: 30, reveals: 0, summary_used: false, source_used: false, gave_up: true,  solved: false, duration_seconds: 120, score: 99 },
+    { game_type: "fandom_daily",   wiki: "minecraft.wiki",         puzzle_date: minus(1),  total_guesses: 20, reveals: 0, summary_used: false, source_used: false, gave_up: false, solved: true,  duration_seconds: 200, score: 10 },
+    { game_type: "full_random",    wiki: "en.wikipedia.org",       puzzle_date: null,      total_guesses: 10, reveals: 0, summary_used: false, source_used: true,  gave_up: true,  solved: false, duration_seconds: 90, score: 25 },
   ];
   // stats reads its OWN rows with a GET; recordPlay still upserts with POST → split by method
   await page.route("**/rest/v1/plays**", r =>
@@ -234,16 +236,19 @@ test("My stats splits dailies vs free play, filters by source, keeps featured ne
   // ---- Combined ----
   const daily = page.locator("#statsBody .statgrid").nth(0).locator(".stat");
   const free  = page.locator("#statsBody .statgrid").nth(1).locator(".stat");
-  await expect(daily).toHaveCount(8);
+  await expect(daily).toHaveCount(10);
   await expect(daily.nth(0)).toContainText("4");        // Played (3 featured + 1 fandom daily)
   await expect(daily.nth(1)).toContainText("75%");      // Solved (3/4)
   await expect(daily.nth(2)).toContainText("2");        // Current streak (today + yesterday)
   await expect(daily.nth(4)).toContainText("36.7");     // Avg guesses over solved (40,50,20)
   await expect(daily.nth(6)).toContainText("2");        // Clean solves (today featured + minecraft)
   await expect(daily.nth(7)).toContainText("1");        // Gave up
-  await expect(free).toHaveCount(6);                    // no streak tiles for free play
+  await expect(daily.nth(8)).toContainText("10.0");     // Avg score over solved (5,15,10 → 10.0)
+  await expect(daily.nth(9)).toContainText("1");        // Co-op (today's featured daily was done co-op)
+  await expect(free).toHaveCount(7);                    // no streak tiles for free play
   await expect(free.nth(0)).toContainText("1");         // Played (the wikipedia random)
   await expect(free.nth(1)).toContainText("0%");        // Solved (gave up)
+  await expect(free.nth(6)).toContainText("—");         // Avg score (no solved free-play games)
   // heatmap aggregates dailies: 2 solved days, 1 missed. Assert they're actually
   // RENDERED (visible), not just class-present — a class collision with the global
   // `.win{display:none}` banner once hid every solved cell while keeping its green

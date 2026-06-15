@@ -178,6 +178,13 @@
   #playarea {
     display:grid; align-items:start; column-gap:34px;
     grid-template-columns:minmax(0,1fr) minmax(420px,560px);
+    /* the controls column spans both rows; when it's TALLER than status+article (short
+       article, hints open, multiplayer standings) an `auto auto` grid would distribute
+       that height across BOTH rows — stretching the status row and shoving the article
+       down, leaving a big gap under the status bar. Pin the status row to its content
+       (min-content) and let the article row (1fr) absorb any extra height instead, so
+       the article always sits directly under the status bar. */
+    grid-template-rows:min-content 1fr;
     grid-template-areas:
       "status  controls"
       "article controls";
@@ -186,7 +193,8 @@
      the controls column spans both rows so it starts at the same height (not below it) */
   .statusbar { grid-area:status; display:flex; align-items:center; gap:12px; margin-bottom:10px; }
   .statusbar .status { flex:1; min-width:0; margin-bottom:0; }
-  .statusbtns { display:flex; gap:8px; flex:0 0 auto; }
+  .statusbar .score { font-family:var(--mono); font-size:.8rem; font-weight:700; color:var(--ink); white-space:nowrap; flex:0 0 auto; }
+  .statusbtns { display:flex; gap:8px; flex:0 0 auto; margin-left:auto; }
   .statusbtns button { background:var(--paper); color:var(--ink); padding:7px 12px; font-size:.72rem; }
   .statusbtns button:hover:not(:disabled) { background:var(--ink); color:var(--paper); border-color:var(--ink); }
   #article { grid-area:article; }
@@ -284,6 +292,30 @@
   .win { margin-top:24px; padding:16px; border:3px double var(--classified); font-family:var(--mono); display:none; }
   .win.show { display:block; }
   .win h3 { margin:0 0 6px; color:var(--classified); letter-spacing:.1em; }
+
+  /* ---- multiplayer ---- */
+  .authnote { font-family:var(--mono); font-size:.78rem; color:var(--ink); background:var(--hintbg); border:1px solid var(--line); padding:8px 10px; border-radius:4px; margin-bottom:12px; }
+  .mp-modes { display:flex; gap:10px; margin-bottom:10px; }
+  .mp-modes .mp-card { flex:1 1 0; }
+  .mpmodemsg { font-family:var(--mono); font-size:.74rem; color:var(--classified); margin:2px 0 10px; }
+  .mppanel { border:1px solid var(--line); border-radius:5px; padding:10px; margin-bottom:12px; background:var(--surface); font-family:var(--mono); }
+  .mppanel .mp-head { font-size:.74rem; color:var(--muted); margin-bottom:7px; text-transform:uppercase; letter-spacing:.06em; }
+  .mp-copy { width:100%; margin-bottom:8px; }
+  .mp-standings { display:flex; flex-direction:column; gap:4px; }
+  .mp-peer { font-size:.78rem; padding:4px 7px; border:1px solid var(--line); border-radius:4px; background:var(--paper); }
+  .mp-peer.me { border-color:var(--ink); font-weight:600; }
+  .mp-card.sel { border-color:var(--classified); }
+  .history .row .rmeta { display:flex; align-items:baseline; gap:10px; flex:0 0 auto; }
+  .history .row .by { color:var(--muted); font-size:.68rem; font-style:italic; }
+  .mpwaiting { position:fixed; inset:0; z-index:48; display:flex; align-items:center; justify-content:center;
+    background:rgba(0,0,0,.55); padding:20px; }
+  .mpwaiting[hidden] { display:none; }
+  .mpwaiting-card { background:var(--paper); color:var(--ink); border:3px double var(--classified); border-radius:6px;
+    padding:22px 26px; max-width:380px; text-align:center; font-family:var(--mono); }
+  .mpwaiting-card h3 { margin:0 0 8px; color:var(--classified); letter-spacing:.08em; }
+  .mpwaiting-card p { margin:0 0 14px; font-size:.84rem; color:var(--muted); }
+  .mpwaiting-card button { width:100%; }
+  @media (max-width:640px) { .mp-modes { flex-direction:column; } }
 
   label.opt { font-family:var(--mono); font-size:.75rem; color:var(--muted); display:inline-flex; align-items:center; gap:5px; cursor:pointer; }
 
@@ -439,6 +471,17 @@
       <button class="modal-x" id="modalClose" aria-label="Close">&times;</button>
       <h2 class="modal-title">New game</h2>
       <div class="opts">
+        <div class="mp-modes" id="mpModes">
+          <button class="opt-card mp-card" id="coopBtn">
+            <span class="opt-t">Co-op — solve together</span>
+            <span class="opt-d">Share one board with friends; everyone's guesses &amp; hints are live.</span>
+          </button>
+          <button class="opt-card mp-card" id="versusBtn">
+            <span class="opt-t">Versus — race each other</span>
+            <span class="opt-d">You host: share the link, then press Play to start the race.</span>
+          </button>
+        </div>
+        <div class="mpmodemsg" id="mpModeMsg" hidden></div>
         <button class="opt-card" id="curatedBtn">
           <span class="opt-t">Curated random</span>
           <span class="opt-d">A quality-checked article — same search as the daily.</span>
@@ -547,6 +590,7 @@
     <div class="modal-card" role="dialog" aria-modal="true" aria-label="Sign in">
       <button class="modal-x" id="authClose" aria-label="Close">&times;</button>
       <h2 class="modal-title">Sign in</h2>
+      <div class="authnote" id="authJoinNote" hidden>Sign in to join this game — multiplayer needs an account.</div>
       <div class="authpanel" id="authpanel">
         <button class="google" id="googleBtn">
           <svg width="15" height="15" viewBox="0 0 48 48" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.9 2.4 30.4 0 24 0 14.6 0 6.4 5.4 2.6 13.2l7.9 6.2C12.3 13.2 17.6 9.5 24 9.5z"/><path fill="#4285F4" d="M46.1 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.4c-.5 2.9-2.1 5.3-4.6 6.9l7.1 5.5c4.2-3.9 6.6-9.6 6.6-16.4z"/><path fill="#FBBC05" d="M10.5 28.4c-.5-1.4-.8-2.9-.8-4.4s.3-3 .8-4.4l-7.9-6.2C1 16.6 0 20.2 0 24s1 7.4 2.6 10.6l7.9-6.2z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.1-5.5c-2 1.3-4.5 2.1-8.8 2.1-6.4 0-11.7-3.7-13.5-9.9l-7.9 6.2C6.4 42.6 14.6 48 24 48z"/></svg>
@@ -569,12 +613,20 @@
   <div id="playarea">
     <div class="statusbar" id="statusbar">
       <div class="status" id="status">Loading puzzle…</div>
+      <div class="score" id="scorePill" title="Your score — lower is better. Wrong guess +1, reveal a word +5, summary/category/source +10, first letter +20. Correct guesses are free.">Score: <b id="scoreVal">0</b></div>
       <div class="statusbtns">
         <button id="shareBtn">Share</button>
+        <button id="inviteBtn" hidden>Invite (co-op)</button>
         <button id="metricsBtn">Daily metrics</button>
       </div>
     </div>
     <div id="controlcol">
+      <!-- multiplayer HUD: invite link + live roster / versus standings (hidden in solo play) -->
+      <div class="mppanel" id="mpPanel" hidden>
+        <div class="mp-head"><span id="mpTitle">Multiplayer</span></div>
+        <button id="mpCopyBtn" class="ghost mp-copy" type="button">📋 Copy invite link</button>
+        <div class="mp-standings" id="mpStandings"></div>
+      </div>
       <div class="tools">
         <button id="revealBtn" disabled>Reveal a word (3 left)</button>
         <button id="hintsBtn" disabled>Hints</button>
@@ -605,6 +657,19 @@
   </div>
 
   <div class="win" id="win"><h3 id="winHead">DECLASSIFIED</h3><div id="winText"></div></div>
+
+  <!-- versus: the board is locked until the host presses Play; everyone else waits here -->
+  <div class="mpwaiting" id="mpWaiting" hidden>
+    <div class="mpwaiting-card">
+      <h3 id="mpWaitHead">Get ready…</h3>
+      <p id="mpWaitMsg">Waiting for the host to start the match.</p>
+      <!-- the host copies the link from HERE — the overlay covers #mpPanel, so the
+           panel's copy is unreachable while waiting. Just a Copy button (no raw link). -->
+      <button id="mpWaitCopyBtn" class="ghost" type="button" hidden>📋 Copy invite link</button>
+      <button id="mpPlayBtn" type="button" hidden>Play — start the match</button>
+      <button id="mpCancelBtn" class="ghost" type="button" hidden>Cancel match</button>
+    </div>
+  </div>
 
   <footer id="attribution"></footer>
 </div>
@@ -653,6 +718,7 @@ const EMPTY_HINTS = { category: "", summary: "", first_letter: "" };
 let serverFinished = false;
 let gameStartedAt = 0;   // ms epoch when the current article first loaded (for play-log duration; persisted across daily resumes)
 let gameFinishedAt = 0;  // ms epoch when the game was solved/given up — freezes the play-log duration so it stops ticking after the finish (persisted across daily resumes)
+let mpCoopPlay = false;  // this game was played in co-op — logged to plays.coop. For a daily converted to co-op it's the ONLY marker (the daily keeps its game_type). Persisted across daily resumes.
 let currentPlayId = null;   // stable per-play key the `plays` upsert dedupes on (daily → puzzle_id; random/custom → minted id)
 const mintPlayId = () => (window.crypto && crypto.randomUUID)
   ? crypto.randomUUID()
@@ -796,6 +862,7 @@ function refreshMeta() {
   const total = tokens.filter(t => !t.stop).length || 1;
   const shown = tokens.filter(t => !t.stop && t.revealed).length;
   document.getElementById("pct").textContent = Math.round(shown/total*100) + "%";
+  updateScore();
   const h = document.getElementById("history"); h.innerHTML = "";
   [...guesses].reverse().forEach(g => {
     const row = document.createElement("div");
@@ -805,10 +872,25 @@ function refreshMeta() {
     const label = g.hint ? g.word + " (revealed)" : g.word;
     // textContent, not innerHTML — g.word is raw player input (and a restored guess list)
     const wordSpan = document.createElement("span"); wordSpan.textContent = label;
+    // group the hit-count and (co-op) the guesser's name on the RIGHT, so the count
+    // doesn't float in the middle when a name is shown. Name sits last (achteraan).
+    const rmeta = document.createElement("span"); rmeta.className = "rmeta";
     const nSpan = document.createElement("span"); nSpan.className = "n" + (g.hits ? " hit" : ""); nSpan.textContent = g.hits;
-    row.append(wordSpan, nSpan);
+    rmeta.appendChild(nSpan);
+    if (g.by) { const by = document.createElement("span"); by.className = "by"; by.textContent = g.by; rmeta.appendChild(by); }
+    row.append(wordSpan, rmeta);
     h.appendChild(row);
   });
+  if (mp.active) mp.publishProgress();
+  updateInviteBtn();   // also when NOT in a room — that's exactly when the button should appear
+}
+
+// the "Invite (co-op)" button: offered whenever you're playing ANY article (custom,
+// random OR a daily — the rev is on META.source), to a real account, not already in a room.
+function updateInviteBtn() {
+  const b = document.getElementById("inviteBtn"); if (!b) return;
+  const rev = currentShare.rev || (META && META.source && META.source.revision_id);
+  b.hidden = !(isRealUser() && currentShare.wiki && rev && !mp.active);
 }
 
 // only http(s) urls are safe to put in an href — a custom/shared link can point at
@@ -877,7 +959,7 @@ function checkWin() {
     const reveals = guesses.filter(g => g.hint).length;
     document.getElementById("winText").textContent =
       'Title: "' + META.title + '" — solved in ' + guesses.length + ' guesses'
-      + (reveals ? ' (' + reveals + ' revealed)' : '') + '.';
+      + (reveals ? ' (' + reveals + ' revealed)' : '') + '. Score ' + computeScore() + ' (lower is better).';
     lockGame();
     refreshMeta();
     attribution(true);
@@ -897,11 +979,14 @@ function giveUp() {
   document.getElementById("winHead").textContent = "GAVE UP";
   document.getElementById("win").classList.add("show");
   document.getElementById("winText").textContent =
-    'You gave up. The title was "' + META.title + '".';
+    'You gave up. The title was "' + META.title + '". Score ' + computeScore() + ' (lower is better).';
   lockGame();
   refreshMeta();
   attribution(true);
   saveDailyState();   // persists locally (dailies) AND records the give-up to the play-log (all types)
+  // co-op shares one board, so a give-up ends the game for everyone — tell teammates
+  // (unless this give-up was itself triggered by a teammate's broadcast)
+  if (mp.active && mp.mode === "coop" && !mp._remoteGiveUp) mp.broadcastGiveUp();
 }
 
 // update the token model for a guess (no render) — returns the hit count.
@@ -914,8 +999,12 @@ function recordGuess(key, raw, isHint) {
   return hits;
 }
 
-function applyGuess(key, raw, isHint) {
+function applyGuess(key, raw, isHint, remote) {
   const hits = recordGuess(key, raw, isHint);
+  // co-op: tag EVERY guess with who made it (your own name for local guesses, the
+  // sender's for remote) so the history credits everyone, not just teammates
+  if (mp.active && mp.mode === "coop" && guesses.length)
+    guesses[guesses.length - 1].by = remote ? (mp._incomingBy || null) : mpName();
   revealKey(key); flashKey(key); refreshMeta(); checkWin();
   // a correct typed guess moves the locate highlight onto that word (same as
   // clicking it in the history) instead of leaving it on the last word clicked.
@@ -923,6 +1012,9 @@ function applyGuess(key, raw, isHint) {
   // Auto-scroll to the word is a preference (Settings → Jump to a word…).
   if (!isHint && hits > 0 && !solved) gotoWord(key, prefAutoScroll);
   saveDailyState();
+  // co-op: broadcast our own typed guesses so the shared board updates for everyone
+  // (reveals broadcast separately from handleBodyClick; remote-applied guesses never re-broadcast)
+  if (!remote && mp.active && mp.mode === "coop" && !isHint) mp.broadcastGuess(key, raw, false);
   return hits;
 }
 
@@ -970,6 +1062,7 @@ function handleBodyClick(e) {
   hintsLeft--;
   disarm();
   saveDailyState();
+  if (mp.active && mp.mode === "coop") mp.broadcastReveal(key);   // co-op: mirror the reveal to teammates
   setStatus("Word revealed — " + hintsLeft + " reveal(s) left.");
 }
 
@@ -1002,7 +1095,9 @@ const HINT_TIERS = [
 // the title's first letter — derived locally, so it's instant and always available
 // (no round-trip), even for a daily whose AI hint was never generated.
 function firstLetterHint() {
-  const m = String((META && META.title) || "").match(/[a-z0-9]/i);
+  // match a Unicode letter/number (not just ASCII) so an accented/non-Latin title
+  // ("Élan", "東京") reports its real first character — mirrors firstLetterOf in the hint fn
+  const m = String((META && META.title) || "").match(/[\p{L}\p{N}]/u);
   return m ? m[0].toUpperCase() : "?";
 }
 
@@ -1033,6 +1128,7 @@ function renderHints() {
   const box = document.getElementById("hintbox");
   box.textContent = "";
   box.style.display = "block";
+  updateScore();   // a tier may have just been revealed — keep the live score in sync
   HINT_TIERS.forEach(t => {
     const row = document.createElement("div");
     row.className = "hint-tier";
@@ -1071,6 +1167,8 @@ function addTier(key) {
   summaryUsed = true;
   saveDailyState();
   renderHints();
+  // co-op: share the revealed tier + its packet so teammates see the same hint (no extra Groq call)
+  if (mp.active && mp.mode === "coop") mp.broadcastHint(key);
 }
 
 // reveal the source wiki (also used directly when the fandom isn't secret —
@@ -1078,6 +1176,7 @@ function addTier(key) {
 function revealSource() {
   if (!fandomUsed) { fandomUsed = true; saveDailyState(); }
   renderHints();
+  if (mp.active && mp.mode === "coop") mp.broadcastHint("source");   // co-op: share the source tier
 }
 
 async function revealTier(key) {
@@ -1114,7 +1213,7 @@ function initGame(title, blocks, meta) {
   META = { ...meta, title };
   hints = parseHintPacket(meta.summary) || { ...EMPTY_HINTS };
   hintTiers = []; hintLoading = null;
-  guesses = []; guessed = new Set(); tokens = []; hintsLeft = 3; revealArmed = false; solved = false; summaryUsed = false; fandomUsed = false; gaveUp = false; serverFinished = false;
+  guesses = []; guessed = new Set(); tokens = []; hintsLeft = 3; revealArmed = false; solved = false; summaryUsed = false; fandomUsed = false; gaveUp = false; serverFinished = false; mpCoopPlay = false;
   gameStartedAt = Date.now(); gameFinishedAt = 0;   // reset the clock; a daily resume overrides these with the saved start/finish (restoreDailyState)
   wordNav = new Map(); currentNavKey = null;   // reset history-navigation cursors for the new article
   titleToks = tokenize(title, "title");
@@ -1234,6 +1333,8 @@ const badTitle = t =>
 // shared core: load an article by page title or by revision (oldid)
 async function loadArticle(apiBase, wikiLabel, parseParams, opts = {}) {
   setStatus("Loading article…");
+  // starting a fresh solo game while in a room (and not loading INTO one) → leave it
+  if (mp.active && !mp._loading && !pendingMpMode) mp.leaveRoom();
   const parsed = await apiGet(apiBase, { action: "parse", prop: "text|revid", redirects: "1", formatversion: "2", ...parseParams });
   const realTitle = parsed.parse.title;
   if (opts.requireCleanTitle && badTitle(realTitle)) throw new Error("skip: unsuitable title");
@@ -1293,6 +1394,8 @@ async function loadArticle(apiBase, wikiLabel, parseParams, opts = {}) {
   // longer a secret — reveal the source tier. The daily path reveals *after*
   // restoreDailyState (in loadPuzzlePointer), so it can't clobber progress.
   if (opts.revealFandom && !opts.daily) revealSource();
+  // multiplayer: a New-game flow picked a mode → open the room now that the article loaded
+  if (!opts.daily && pendingMpMode) { const m = pendingMpMode; pendingMpMode = null; mp.createRoom(m); }
 }
 
 // Ask the "hint" Edge Function for the layered packet and, when it arrives, stash it
@@ -1673,6 +1776,30 @@ function buildShareUrl() {
 // share icon for each hint tier (same least→most order as HINT_TIERS / the panel)
 const SHARE_ICON = { category: "📂", summary: "📄", first_letter: "🔤", source: "🏷️" };
 
+/* ---- score: lower is better -------------------------------------------------
+   A correct typed guess is free (+0); every bit of help adds points. Penalties:
+   wrong guess +1, free word reveal +5, the source/summary/category hint tiers +10
+   each, the first-letter tier +20. Derived purely from the same play state the
+   share line uses (guesses / hintTiers / fandomUsed), so the live pill, the share
+   text and the win banner can never disagree. */
+const SCORE = { wrongGuess: 1, reveal: 5, category: 10, summary: 10, first_letter: 20, source: 10 };
+function computeScore() {
+  if (!guesses) return 0;
+  const bad = guesses.filter(g => !g.hint && g.hits === 0).length;   // wrong typed guesses
+  const reveals = guesses.filter(g => g.hint).length;                // paid free-word reveals
+  let s = bad * SCORE.wrongGuess + reveals * SCORE.reveal;
+  (hintTiers || []).forEach(k => { s += SCORE[k] || 0; });           // category / summary / first_letter
+  if (fandomUsed) s += SCORE.source;                                 // source tier
+  return s;
+}
+
+// repaint the live score pill — called on every guess/reveal (refreshMeta) and on
+// every hint-tier reveal (renderHints), so it tracks the game in real time.
+function updateScore() {
+  const el = document.getElementById("scoreVal");
+  if (el) el.textContent = computeScore();
+}
+
 // a proportional 10-block accuracy bar (🟩 good vs ⬛ missed typed guesses). "" when
 // there are no typed guesses yet (reveals/hints only). Each side keeps ≥1 block when
 // it has any guesses, so a single miss/hit still shows.
@@ -1709,6 +1836,7 @@ function buildShareText() {
     .filter(t => t.key === "source" ? fandomUsed : hintTiers.includes(t.key))
     .map(t => SHARE_ICON[t.key] + " " + t.label.toLowerCase());
   if (helps.length) lines.push(helps.join("  "));
+  lines.push("🎯 Score " + computeScore() + " (lower is better)");
   return lines.join("\n");
 }
 
@@ -2053,6 +2181,7 @@ function saveDailyState() {
       hintsLeft, solved: !!solved, summaryUsed: !!summaryUsed, fandomUsed: !!fandomUsed,
       hintTiers: (hintTiers || []).slice(),   // which AI/letter tiers were revealed (restore the panel)
       gaveUp: !!gaveUp,
+      coop: !!mpCoopPlay,   // a daily done co-op stays flagged across a same-day reload (the room itself is ephemeral)
       startedAt: gameStartedAt || null,   // keep the original start so a same-day resume reports honest duration
       finishedAt: gameFinishedAt || null   // keep the frozen finish so a resume doesn't keep the clock ticking past the solve/give-up
     }));
@@ -2098,6 +2227,7 @@ async function restoreDailyState() {
   if (typeof saved.hintsLeft === "number") hintsLeft = Math.max(0, saved.hintsLeft);
   if (typeof saved.startedAt === "number" && saved.startedAt > 0) gameStartedAt = saved.startedAt;   // honest duration across resumes
   if (typeof saved.finishedAt === "number" && saved.finishedAt > 0) gameFinishedAt = saved.finishedAt;   // restore the frozen finish so the duration stays put
+  mpCoopPlay = !!saved.coop;             // keep the "this daily was done co-op" flag across a reload (the room is gone, but plays.coop must stay)
   draw(); refreshMeta();
   checkWin();                             // marks solved + reveals all if the saved game was won
   // re-show the hint tiers they had revealed (granular list; fall back to the legacy
@@ -2252,6 +2382,7 @@ async function onAuth(session) {
   // plays across to it BEFORE we re-log the current game under the real id
   if (isRealUser()) await maybeMergeAnon();
   renderAuth();
+  if (isRealUser() && pendingRoom) consumePendingRoom();           // a ?room= invite was waiting on sign-in
   if (solved && currentShare.kind === "daily") submitScore();      // save a score solved before signing in
   recordPlay();                                                    // log the current game under the (guest or real) id
   if (document.getElementById("metricsmodal").classList.contains("open")) loadDailyMetrics();
@@ -2289,7 +2420,7 @@ async function captureAnonForMerge() {
     const u = data.session && data.session.user;
     if (u && u.is_anonymous) {
       localStorage.setItem("redigeerdle:anonmerge",
-        JSON.stringify({ id: u.id, token: data.session.access_token }));
+        JSON.stringify({ id: u.id, token: data.session.access_token, at: Date.now() }));
     }
   } catch { /* no guest session to carry over */ }
 }
@@ -2303,9 +2434,19 @@ async function maybeMergeAnon() {
   if (!saved || !saved.id || !saved.token || saved.id === currentUser.id) {
     localStorage.removeItem("redigeerdle:anonmerge"); return;
   }
-  try { await supa.functions.invoke("merge-anon", { body: { anon_token: saved.token } }); }
-  catch { /* best-effort: if it fails the guest's plays just stay under the guest id */ }
-  localStorage.removeItem("redigeerdle:anonmerge");
+  // the guest access token (a JWT) expires (~1h). If our snapshot is older than that, a
+  // merge can't succeed, so drop it rather than retry a doomed call on every sign-in.
+  if (saved.at && Date.now() - saved.at > 55 * 60 * 1000) {
+    localStorage.removeItem("redigeerdle:anonmerge"); return;
+  }
+  // only clear the marker on a CONFIRMED merge — a transient failure (function down /
+  // network) keeps it so the next sign-in retries (silently losing a guest's plays is
+  // worse than one extra best-effort call; the freshness check above bounds the retries).
+  // supabase-js returns { error } for a non-2xx and only throws on a network error.
+  try {
+    const { error } = await supa.functions.invoke("merge-anon", { body: { anon_token: saved.token } });
+    if (!error) localStorage.removeItem("redigeerdle:anonmerge");
+  } catch { /* transient — keep the marker for a later retry */ }
 }
 
 async function signInGoogle() {
@@ -2353,6 +2494,7 @@ async function submitScore() {
   // anonymous guests log `plays` but never the public leaderboard — real accounts only
   if (!supa || !isRealUser() || !solved || currentShare.kind !== "daily" || !dailyDate || !dailyFeatured) return;
   if (serverFinished) return;   // reconstructed end-state (0 guesses) — never push a bogus leaderboard row
+  if (mpCoopPlay) return;       // a co-op solve isn't a fair solo leaderboard entry (it still counts in daily stats via plays)
   const reveals = guesses.filter(g => g.hint).length;
   const row = { user_id: currentUser.id, puzzle_date: dailyDate, guesses: guesses.length, reveals, solved: true };
   // keep the player's best (fewest guesses) for the day
@@ -2398,8 +2540,10 @@ async function recordPlay() {
     revision_id: (META.source || {}).revision_id || null,
     total_guesses: guesses.length,
     good_guesses: good, wrong_guesses: wrong, reveals,
+    score: computeScore(),   // golf-style total (lower is better); see SCORE / computeScore
     revealed_pct: revealedPct,
     summary_used: !!summaryUsed, source_used: !!fandomUsed,
+    coop: !!mpCoopPlay,   // played co-op (shared board). For a co-op daily this is the only marker — game_type stays the daily's.
     gave_up: !!gaveUp, solved: !!solved,
     started_at: gameStartedAt ? new Date(gameStartedAt).toISOString() : null,
     // freeze the clock once the game is over: use the finish timestamp if we have it,
@@ -2461,7 +2605,8 @@ async function loadMetricsAggregate(stats, list) {
     { k: "Players", v: String(m.players) },
     { k: "Completion", v: (m.completion_pct ?? 0) + "%" },
     { k: "Avg guesses", v: m.avg_guesses != null ? Number(m.avg_guesses).toFixed(1) : "—" },
-    { k: "Avg time", v: m.avg_seconds != null ? fmtDuration(m.avg_seconds) : "—" }
+    { k: "Avg time", v: m.avg_seconds != null ? fmtDuration(m.avg_seconds) : "—" },
+    { k: "Avg score", v: m.avg_score != null ? Number(m.avg_score).toFixed(1) : "—" }
   ];
   stats.innerHTML = cards.map(c =>
     "<div class='stat'><div class='v'>" + c.v + "</div><div class='k'>" + c.k + "</div></div>"
@@ -2514,6 +2659,7 @@ function aggregate(rows) {
   const solved = rows.filter(r => r.solved);
   const clean  = solved.filter(r => !r.reveals && !r.summary_used && !r.source_used);
   const dur    = solved.filter(r => r.duration_seconds != null);
+  const scored = solved.filter(r => r.score != null);   // score over SOLVED games (lower is better)
   const mean = (arr, f) => arr.length ? arr.reduce((s, r) => s + (f(r) || 0), 0) / arr.length : null;
   return {
     played: rows.length,
@@ -2522,7 +2668,9 @@ function aggregate(rows) {
     gaveUp: rows.filter(r => r.gave_up).length,
     clean: clean.length,
     avgGuesses: mean(solved, r => r.total_guesses),
-    avgSeconds: mean(dur, r => r.duration_seconds)
+    avgSeconds: mean(dur, r => r.duration_seconds),
+    avgScore: mean(scored, r => r.score),
+    coopCount: rows.filter(r => r.coop).length   // games played co-op (for a daily this is the only co-op signal)
   };
 }
 
@@ -2571,7 +2719,7 @@ async function loadMyStats() {
   try { await getWikiList(); } catch { /* nicer labels if available; falls back to host */ }
   try {
     const { data, error } = await supa.from("plays")
-      .select("game_type,wiki,puzzle_date,total_guesses,reveals,summary_used,source_used,gave_up,solved,duration_seconds")
+      .select("game_type,wiki,puzzle_date,total_guesses,reveals,summary_used,source_used,gave_up,solved,duration_seconds,score,coop")
       .eq("user_id", currentUser.id);
     if (error) { const d = document.createElement("div"); d.className = "empty"; d.textContent = "Couldn't load: " + error.message; body.replaceChildren(d); return; }
     statsRows = data || [];
@@ -2612,13 +2760,16 @@ function renderMyStats() {
     { k: "Current streak", v: dStreak.cur }, { k: "Best streak", v: dStreak.best },
     { k: "Avg guesses", v: dAgg.avgGuesses != null ? dAgg.avgGuesses.toFixed(1) : "—" },
     { k: "Avg time", v: dAgg.avgSeconds != null ? fmtDuration(dAgg.avgSeconds) : "—" },
-    { k: "Clean solves", v: dAgg.clean }, { k: "Gave up", v: dAgg.gaveUp }
+    { k: "Clean solves", v: dAgg.clean }, { k: "Gave up", v: dAgg.gaveUp },
+    { k: "Avg score", v: dAgg.avgScore != null ? dAgg.avgScore.toFixed(1) : "—" },
+    { k: "Co-op", v: dAgg.coopCount }   // dailies you solved together (kept in daily stats, flagged co-op)
   ];
   const fTiles = [
     { k: "Played", v: fAgg.played }, { k: "Solved", v: fAgg.winPct + "%" },
     { k: "Avg guesses", v: fAgg.avgGuesses != null ? fAgg.avgGuesses.toFixed(1) : "—" },
     { k: "Avg time", v: fAgg.avgSeconds != null ? fmtDuration(fAgg.avgSeconds) : "—" },
-    { k: "Clean solves", v: fAgg.clean }, { k: "Gave up", v: fAgg.gaveUp }
+    { k: "Clean solves", v: fAgg.clean }, { k: "Gave up", v: fAgg.gaveUp },
+    { k: "Avg score", v: fAgg.avgScore != null ? fAgg.avgScore.toFixed(1) : "—" }
   ];
 
   const legend = "<div class='statcal-legend'>"
@@ -2714,15 +2865,22 @@ document.getElementById("lens").addEventListener("change", () => { if (tokens) d
 document.getElementById("homeBtn").addEventListener("click", () => {
   closeMenu(); setMode("daily"); openHomeDaily();
 });
+// cancel a half-made multiplayer pick when the New game modal is dismissed WITHOUT
+// loading an article (the programmatic closeMenu() during a load must NOT clear it).
+function resetMpModePick() {
+  pendingMpMode = null;
+  const m = document.getElementById("mpModeMsg"); if (m) m.hidden = true;
+  document.querySelectorAll("#mpModes .mp-card").forEach(c => c.classList.remove("sel"));
+}
 document.getElementById("newBtn").addEventListener("click", () => {
   const m = document.getElementById("newmodal");
-  if (m.classList.contains("open")) { closeMenu(); setMode("daily"); }
+  if (m.classList.contains("open")) { resetMpModePick(); closeMenu(); setMode("daily"); }
   else openMenu();
 });
-document.getElementById("modalClose").addEventListener("click", () => { closeMenu(); setMode("daily"); });
+document.getElementById("modalClose").addEventListener("click", () => { resetMpModePick(); closeMenu(); setMode("daily"); });
 // click the dimmed backdrop (outside the card) to close
 document.getElementById("newmodal").addEventListener("click", e => {
-  if (e.target.id === "newmodal") { closeMenu(); setMode("daily"); }
+  if (e.target.id === "newmodal") { resetMpModePick(); closeMenu(); setMode("daily"); }
 });
 document.getElementById("curatedBtn").addEventListener("click", () => loadRandomArticle(true));
 document.getElementById("fullRandomBtn").addEventListener("click", () => loadRandomArticle(false));
@@ -2831,6 +2989,31 @@ document.getElementById("fandomSearch").addEventListener("input", filterFandomPi
 document.getElementById("fandomSearch").addEventListener("keydown", e => { if (e.key === "Enter") goFandom(); });
 document.getElementById("shareBtn").addEventListener("click", doShare);
 
+/* ---- multiplayer wiring ---- */
+// New game → choose a multiplayer mode, then pick any article source below; the room
+// is created once that article finishes loading (loadArticle, gated on pendingMpMode).
+function chooseMpMode(mode) {
+  if (!isRealUser()) { closeMenu(); needSignIn("Sign in to play multiplayer — it needs an account."); return; }
+  pendingMpMode = mode;
+  const msg = document.getElementById("mpModeMsg");
+  msg.hidden = false;
+  msg.textContent = (mode === "versus" ? "Versus" : "Co-op") + " selected — now pick an article below to open the room.";
+  document.querySelectorAll("#mpModes .mp-card").forEach(c => c.classList.toggle("sel", c.id === (mode === "versus" ? "versusBtn" : "coopBtn")));
+}
+document.getElementById("coopBtn").addEventListener("click", () => chooseMpMode("coop"));
+document.getElementById("versusBtn").addEventListener("click", () => chooseMpMode("versus"));
+// "Invite (co-op)" next to Share — spin up a co-op room around the CURRENT article
+document.getElementById("inviteBtn").addEventListener("click", () => mp.createRoom("coop"));
+async function copyInvite(btn, inputId) {
+  const label = btn.textContent;
+  try { await navigator.clipboard.writeText(mp.inviteUrl()); btn.textContent = "Copied!"; setTimeout(() => { btn.textContent = label; }, 1500); }
+  catch { const inp = inputId && document.getElementById(inputId); if (inp) inp.select(); else prompt("Copy this invite link:", mp.inviteUrl()); }
+}
+document.getElementById("mpCopyBtn").addEventListener("click", e => copyInvite(e.currentTarget, null));
+document.getElementById("mpWaitCopyBtn").addEventListener("click", e => copyInvite(e.currentTarget, null));
+document.getElementById("mpPlayBtn").addEventListener("click", () => mp.startMatch());
+document.getElementById("mpCancelBtn").addEventListener("click", () => mp.cancelMatch());
+
 /* ---- sticky top bar: publish the bar's full rendered height as --header-h so the
    sticky guessbar / controls column (and the feed drawer) pin directly below it with
    no gap. We measure the .topbar itself (padding + border included, margin excluded =
@@ -2905,6 +3088,405 @@ function onMobileMqChange() { topbarEl.classList.remove("topbar--hidden"); place
 if (mqMobile.addEventListener) mqMobile.addEventListener("change", onMobileMqChange);
 else mqMobile.addListener(onMobileMqChange);
 
+/* ===========================================================================
+   MULTIPLAYER (mp) — realtime co-op + versus over Supabase Realtime.
+
+   Nothing is persisted server-side: a room rides entirely on a Realtime channel
+   (broadcast + presence). Only the article POINTER (wiki+rev — exactly what the
+   `?g=` share link already carries) and gameplay events travel over it, so the
+   "answer/article text is never stored" invariant holds.
+
+   - co-op: everyone shares ONE board. A local guess/reveal/hint is broadcast and
+     applied on every peer (with `remote=true` so it isn't re-broadcast). Hint
+     packets are broadcast verbatim, so revealing a tier costs no extra Groq call.
+   - versus: each player has their OWN board. The host gates the start with Play
+     (broadcasts `start` + a shared `startAt`); guests wait behind #mpWaiting.
+     Live progress flows through presence (re-track on each guess) → standings.
+
+   Transport is behind `mp.send`/`mp._recv`/`mp._recvPresence` so tests can drive a
+   remote peer by injecting events (and `window.__MP_FAKE_TX` skips the real
+   channel). Requires a real (non-anonymous) account — see isRealUser(). */
+let pendingRoom = null;       // a ?room= join deferred until the user signs in
+let pendingMpMode = null;     // 'coop'|'versus' chosen in New game, applied after the article loads
+// every broadcast event the room uses — bound individually (NOT via a "*" wildcard,
+// which is unreliable for broadcast in supabase-js).
+const MP_EVENTS = ["hello", "config", "guess", "reveal", "hint", "start", "sync-req", "sync", "progress", "giveup", "cancel"];
+
+function randomRoomId() {
+  let s = "";
+  for (let i = 0; i < 8; i++) s += "abcdefghijklmnopqrstuvwxyz0123456789"[Math.floor(Math.random() * 36)];
+  return s;
+}
+function mpName() { return (currentProfile && currentProfile.username) || "Player"; }
+function mpSelfId() { return currentUser ? currentUser.id : "self"; }
+// % of non-stop words uncovered THROUGH PLAY (matches recordPlay's revealed_pct) —
+// honest mid-game progress for the versus standings (not the post-finish reveal-all).
+function mpLivePct() {
+  // tokens/guesses don't exist yet while a guest is still "joining" (no article loaded) —
+  // the standings can render before then, so guard against the uninitialised globals.
+  const nonStop = (tokens || []).filter(t => !t.stop).length || 1;
+  const earned = (guesses || []).reduce((s, g) => s + (g.hits || 0), 0);
+  return Math.min(100, Math.round(earned / nonStop * 100));
+}
+// open the sign-in modal with a "you must sign in" note (multiplayer needs an account)
+function needSignIn(note) {
+  const n = document.getElementById("authJoinNote");
+  if (n) { n.textContent = note || "Sign in to join this game — multiplayer needs an account."; n.hidden = false; }
+  document.getElementById("authmodal").classList.add("open");
+}
+// a freshly signed-in real user with a pending ?room= → join it now
+function consumePendingRoom() {
+  if (!pendingRoom || !isRealUser()) return;
+  const id = pendingRoom; pendingRoom = null;
+  const n = document.getElementById("authJoinNote"); if (n) n.hidden = true;
+  document.getElementById("authmodal").classList.remove("open");
+  mp.joinRoom(id);
+}
+
+const mp = {
+  active: false, mode: null, role: null, roomId: null,
+  started: false, startAt: 0,
+  peers: new Map(),       // userId -> presence meta (excludes self)
+  _transport: null, _sent: [], _entered: false, _incomingBy: null, _loading: false, _helloTimer: null, _remoteGiveUp: false,
+
+  // ---- lifecycle ---------------------------------------------------------
+  createRoom(mode) {
+    if (!isRealUser()) { needSignIn("Sign in to play multiplayer — it needs an account."); return; }
+    // works on ANY article currently loaded — a custom/random pointer, or a daily (rev
+    // lives on META.source). Turning a daily into a room detaches it from the daily so it
+    // isn't scored / replay-blocked: normalise to a plain custom pointer.
+    const wiki = currentShare.wiki;
+    const rev = currentShare.rev || (META && META.source && META.source.revision_id);
+    if (!wiki || !rev) { setStatus("Load an article first, then invite."); return; }
+    // a DAILY converted to co-op STAYS a daily (daily stats + replay-block) — keep its
+    // game_type/puzzle id and the same play row, just flag it co-op. A random/custom
+    // (or versus) game becomes a standalone room logged under its own game_type.
+    if (mode === "coop" && currentShare.kind === "daily" && dailyPuzzleId) {
+      mpCoopPlay = true;                     // the only marker — game_type stays the daily's
+    } else {
+      currentShare = { kind: "custom", wiki, rev, gameType: mode };
+      dailyPuzzleId = null; dailyFeatured = false; dailyDate = null;
+      currentPlayId = mintPlayId();
+      mpCoopPlay = (mode === "coop");
+    }
+    this.mode = mode; this.role = "host"; this.roomId = randomRoomId();
+    this.active = true; this._entered = true;
+    this.started = (mode === "coop");        // co-op plays at once; versus waits for Play
+    this._connect(this.roomId);
+    if (mode === "versus") this._enterWaiting(true);   // the host waits on their own Play too
+    this._renderPanel();
+    updateInviteBtn();                        // we're in a room now → hide the invite button
+  },
+
+  async joinRoom(id) {
+    if (!isRealUser()) { pendingRoom = id; needSignIn(); return; }
+    this.role = "guest"; this.roomId = id; this.active = true;
+    setStatus("Joining the match… waiting for the host.");
+    this._connect(id);
+    // the host's config arrives via presence → _recvPresence() calls _enterRoom().
+  },
+
+  // a guest received the host's room config (mode + article pointer) → build the board
+  async _enterRoom(cfg) {
+    if (this._entered) return;
+    this._entered = true; this._stopHello(); this.mode = cfg.mode; this.active = true; this._loading = true;
+    try { await loadFromRevision(cfg.wiki, cfg.rev); }
+    finally { this._loading = false; }
+    currentShare.gameType = cfg.mode;        // loadArticle reset currentShare → restore the mp type
+    currentPlayId = mintPlayId();
+    mpCoopPlay = (cfg.mode === "coop");      // a guest's game is a standalone coop game (game_type coop)
+    this.started = !!cfg.started;
+    if (cfg.mode === "versus" && !cfg.started) this._enterWaiting(false);
+    if (cfg.mode === "versus" && cfg.started) this.startAt = cfg.startAt || gameStartedAt;
+    if (cfg.mode === "coop") this.send("sync-req", {});   // ask the host to replay shared state
+    this._track();      // republish our presence now that the article's loaded + mode is set
+    this._renderPanel();
+  },
+
+  leaveRoom() {
+    this._stopHello();
+    if (this._transport) { try { this._transport.close(); } catch {} }
+    this.active = false; this.mode = null; this.role = null; this.roomId = null;
+    this.started = false; this._entered = false; this.peers.clear(); this._transport = null;
+    this._exitWaiting();
+    const p = document.getElementById("mpPanel"); if (p) p.hidden = true;
+    updateInviteBtn();   // out of the room → the invite button can return
+  },
+
+  inviteUrl() { return location.origin + location.pathname + "?room=" + this.roomId; },
+
+  // ---- transport ---------------------------------------------------------
+  _connect(roomId) {
+    if (this._transport) return;
+    this.roomId = roomId;
+    if (window.__MP_FAKE_TX || !supa) { this._transport = { send(){}, track(){}, close(){} }; return; }
+    const ch = supa.channel("room:" + roomId, { config: { broadcast: { self: false }, presence: { key: mpSelfId() } } });
+    // Bind a handler PER event name — `{ event: "*" }` is unreliable for broadcast in
+    // supabase-js (the wildcard often never fires), which left guests stuck because the
+    // host's `config` reply never arrived. (supabase-js #1913.)
+    MP_EVENTS.forEach(ev => ch.on("broadcast", { event: ev }, msg => this._recv(ev, msg.payload)));
+    // re-read the full roster on ANY presence change (join/leave/sync).
+    const onPresence = () => {
+      const st = ch.presenceState();
+      this._recvPresence(Object.values(st).map(a => a[0]).filter(Boolean));
+    };
+    ch.on("presence", { event: "sync" }, onPresence);
+    ch.on("presence", { event: "join" }, onPresence);
+    ch.on("presence", { event: "leave" }, onPresence);
+    ch.subscribe(status => {
+      if (status === "SUBSCRIBED") {
+        this._track();                              // publish membership (presence) once we're in
+        if (this.role === "guest" && !this._entered) this._startHello();
+      } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+        // surfacing this matters: a stuck "Joining…" is almost always Realtime being
+        // unreachable/disabled, not a game bug.
+        console.warn("[mp] channel status:", status, "— is Realtime enabled for this project?");
+        if (this.role === "guest" && !this._entered) setStatus("Couldn't reach the match (Realtime " + status + "). Check your connection or try again.");
+      }
+    });
+    this._transport = {
+      send: (event, payload) => ch.send({ type: "broadcast", event, payload }),
+      track: meta => ch.track(meta),
+      close: () => { try { supa.removeChannel(ch); } catch {} },
+    };
+  },
+
+  // our live progress (for the standings) — also the self row in _renderPanel
+  _selfMeta() {
+    return { userId: mpSelfId(), name: mpName(), role: this.role,
+      pct: mpLivePct(), guesses: (guesses || []).length, score: computeScore(),
+      solved: !!solved, gaveUp: !!gaveUp };
+  },
+  // PRESENCE payload = membership only (NOT progress). Presence track() is rate-limited
+  // to 5 calls / 30s per client, so it must NOT be called per guess — progress goes over
+  // broadcast (100 msg/s) instead. The host carries the room config here too.
+  _presenceMeta() {
+    const m = { userId: mpSelfId(), name: mpName(), role: this.role };
+    if (this.role === "host") m.cfg = { mode: this.mode, wiki: currentShare.wiki, rev: currentShare.rev, started: this.started, startAt: this.startAt };
+    return m;
+  },
+  _track() { if (this._transport && this.active) this._transport.track(this._presenceMeta()); },
+  // versus: broadcast our progress (NOT a presence call — see _presenceMeta) so opponents'
+  // standings update live, and repaint our own row immediately.
+  publishProgress() {
+    if (!this.active) return;
+    if (this.mode === "versus") this.send("progress", this._selfMeta());
+    this._renderPanel();
+  },
+  // a guest pings the host until it gets the config back (handshake; covers a lost
+  // packet or the host subscribing slightly later). Stops on enter or after ~20s.
+  _startHello() {
+    this.send("hello", {});
+    if (this._helloTimer) return;
+    let n = 0;
+    this._helloTimer = setInterval(() => {
+      if (this._entered || ++n > 12) { this._stopHello(); return; }
+      this.send("hello", {});
+    }, 1500);
+  },
+  _stopHello() { if (this._helloTimer) { clearInterval(this._helloTimer); this._helloTimer = null; } },
+
+  send(event, payload) { this._sent.push({ event, payload }); if (this._transport) this._transport.send(event, payload); },
+  broadcastGuess(key, raw, hint) { this.send("guess", { key, raw, hint: !!hint, by: mpName() }); },
+  broadcastReveal(key) { this.send("reveal", { key, by: mpName() }); },
+  broadcastHint(tier) { this.send("hint", { tier, packet: hints, by: mpName() }); },
+
+  // ---- incoming ----------------------------------------------------------
+  _recv(event, payload) {
+    payload = payload || {};
+    if (event === "hello") { if (this.role === "host") this._broadcastConfig(); }   // a guest joined → (re)send config
+    else if (event === "config") { if (this.role === "guest" && !this._entered) this._enterRoom(payload); }
+    else if (event === "progress") this._applyProgress(payload);
+    else if (event === "guess") this._applyRemoteGuess(payload);
+    else if (event === "reveal") this._applyRemoteReveal(payload);
+    else if (event === "hint") this._applyRemoteHint(payload);
+    else if (event === "start") this._applyStart(payload.startAt);
+    else if (event === "giveup") this._applyRemoteGiveUp(payload);
+    else if (event === "cancel") this._applyCancel();
+    else if (event === "sync-req") { if (this.role === "host") this._sendSync(); }
+    else if (event === "sync") this._applySync(payload);
+  },
+  // co-op: a teammate gave up → end the shared game here too (giveUp() reveals + locks).
+  // _remoteGiveUp suppresses the re-broadcast so it doesn't bounce back.
+  broadcastGiveUp() { this.send("giveup", { by: mpName() }); },
+  _applyRemoteGiveUp(p) {
+    if (!this.active || solved || gaveUp) return;
+    if (p && p.by) setStatus((p.by) + " gave up — the answer is revealed.");
+    this._remoteGiveUp = true;
+    giveUp();
+    this._remoteGiveUp = false;
+  },
+  // versus host cancels before the match starts → tell guests, then drop the room
+  // (the host keeps the loaded article and can play solo / start a new game).
+  cancelMatch() {
+    this.send("cancel", {});
+    this.leaveRoom();   // hides the overlay + panel, re-enables play
+    setStatus("Match cancelled.");
+  },
+  _applyCancel() {
+    if (this.role === "host") return;
+    setStatus("The host cancelled the match — you can keep playing this article solo.");
+    this.leaveRoom();
+  },
+  // a peer's live progress (versus standings). Merged onto whatever presence membership
+  // we already have for them.
+  _applyProgress(p) {
+    if (!this.active || !p || !p.userId || p.userId === mpSelfId()) return;
+    this.peers.set(p.userId, { ...(this.peers.get(p.userId) || {}), ...p });
+    this._renderPanel();
+  },
+  // host → everyone: the room config (mode + article pointer) a guest needs to enter
+  _broadcastConfig() {
+    this.send("config", { mode: this.mode, wiki: currentShare.wiki, rev: currentShare.rev, started: this.started, startAt: this.startAt });
+  },
+
+  _recvPresence(roster) {
+    const me = mpSelfId();
+    const next = new Map();
+    let newPeer = false;
+    (roster || []).forEach(p => {
+      if (!p || !p.userId || p.userId === me) return;
+      // preserve any last-known broadcast progress for this peer (presence only carries
+      // membership now) so a presence sync doesn't blank their standings numbers
+      next.set(p.userId, { ...(this.peers.get(p.userId) || {}), ...p });
+      if (!this.peers.has(p.userId)) newPeer = true;
+      if (this.role === "guest" && !this._entered && p.role === "host" && p.cfg) this._enterRoom(p.cfg);
+      // a late host "started" while we were waiting
+      if (this.mode === "versus" && !this.started && p.role === "host" && p.cfg && p.cfg.started) this._applyStart(p.cfg.startAt);
+    });
+    this.peers = next;
+    // host backstop: a new peer appeared → (re)broadcast config in case their hello was missed
+    if (this.role === "host" && newPeer) this._broadcastConfig();
+    this._renderPanel();
+  },
+
+  _applyRemoteGuess({ key, raw, hint, by }) {
+    if (!this.active || solved || gaveUp || !key || guessed.has(key)) return;
+    this._incomingBy = by || null;
+    applyGuess(key, raw || "", !!hint, true);
+    this._incomingBy = null;
+  },
+  _applyRemoteReveal({ key, by }) {
+    if (!this.active || solved || gaveUp || hintsLeft <= 0 || !key || guessed.has(key)) return;
+    this._incomingBy = by || null;
+    applyGuess(key, "", true, true);
+    this._incomingBy = null;
+    hintsLeft--; updateRevealBtn(); refreshMeta();
+  },
+  _applyRemoteHint({ tier, packet }) {
+    if (!this.active) return;
+    if (packet) hints = { ...(hints || EMPTY_HINTS), ...packet };
+    if (tier === "source") fandomUsed = true;
+    else if (tier && !hintTiers.includes(tier)) { hintTiers.push(tier); summaryUsed = true; }
+    saveDailyState(); renderHints();
+  },
+  _applyStart(startAt) {
+    // only a GUEST adopts an incoming start — the host owns the clock (it starts the
+    // match via startMatch()). This stops a peer from spoofing a `start` to force-begin
+    // the host's game (broadcast events carry no verified sender, so we gate by role).
+    if (this.role === "host") return;
+    this.started = true; this.startAt = startAt || Date.now();
+    gameStartedAt = this.startAt; gameFinishedAt = 0;
+    this._exitWaiting();
+  },
+  // host (co-op): replay the current shared board to a newcomer
+  _sendSync() {
+    this.send("sync", {
+      guesses: (guesses || []).map(g => ({ key: norm(g.word), raw: g.word, hint: !!g.hint, by: g.by || null })),
+      hintsLeft, hints, hintTiers: (hintTiers || []).slice(), fandomUsed: !!fandomUsed,
+    });
+  },
+  _applySync(payload) {
+    // the host replays its board to joiners (_sendSync) — it must never ADOPT a peer's
+    // sync (that's the authoritative board), so a peer can't overwrite the host's state.
+    if (this.role === "host") return;
+    if (!this.active || (guesses && guesses.length)) return;   // only catch up an empty board
+    (payload.guesses || []).forEach(g => {
+      if (guessed.has(g.key)) return;
+      this._incomingBy = g.by || null;
+      applyGuess(g.key, g.raw || "", !!g.hint, true);
+      this._incomingBy = null;
+    });
+    if (typeof payload.hintsLeft === "number") hintsLeft = payload.hintsLeft;
+    if (payload.hints) hints = payload.hints;
+    if (payload.hintTiers) hintTiers = payload.hintTiers.slice();
+    if (payload.fandomUsed) fandomUsed = true;
+    updateRevealBtn(); refreshMeta(); renderHints();
+  },
+
+  // ---- versus waiting overlay -------------------------------------------
+  _enterWaiting(isHost) {
+    const ov = document.getElementById("mpWaiting");
+    document.getElementById("mpPlayBtn").hidden = !isHost;
+    document.getElementById("mpCancelBtn").hidden = !isHost;   // host can also bail out before starting
+    // the host copies the link from inside the overlay (it covers #mpPanel while waiting)
+    document.getElementById("mpWaitCopyBtn").hidden = !isHost;
+    document.getElementById("mpWaitHead").textContent = isHost ? "You're the host" : "Get ready…";
+    document.getElementById("mpWaitMsg").textContent = isHost
+      ? "Share the invite link, then press Play when everyone's in."
+      : "Waiting for the host to start the match.";
+    ov.hidden = false;
+    document.getElementById("guess").disabled = true;
+    document.getElementById("go").disabled = true;
+  },
+  _exitWaiting() {
+    const ov = document.getElementById("mpWaiting"); if (ov) ov.hidden = true;
+    if (!solved && !gaveUp) { document.getElementById("guess").disabled = false; document.getElementById("go").disabled = false; }
+  },
+  // host presses Play → start the race for everyone
+  startMatch() {
+    this.started = true; this.startAt = Date.now();
+    gameStartedAt = this.startAt; gameFinishedAt = 0;
+    this.send("start", { startAt: this.startAt });
+    this._track();                 // republish cfg.started for late joiners
+    this._exitWaiting();
+  },
+
+  // ---- UI ----------------------------------------------------------------
+  _renderPanel() {
+    const panel = document.getElementById("mpPanel");
+    if (!panel) return;
+    panel.hidden = !this.active;
+    if (!this.active) return;
+    // a guest hasn't learned the mode until the host's config lands — don't mislabel it
+    // "Co-op" in the meantime (the default fallthrough did exactly that for versus joiners)
+    document.getElementById("mpTitle").textContent = !this.mode
+      ? "Joining…"
+      : (this.mode === "versus" ? "Versus" : "Co-op") + (this.role === "host" ? " — you host" : "");
+    const list = document.getElementById("mpStandings");
+    list.textContent = "";
+    const all = [this._selfMeta(), ...this.peers.values()];
+    if (this.mode === "versus") all.sort((a, b) => (Number(b.solved) - Number(a.solved)) || ((a.score || 0) - (b.score || 0)));
+    all.forEach(p => {
+      const row = document.createElement("div");
+      row.className = "mp-peer" + (p.userId === mpSelfId() ? " me" : "");
+      const flag = p.solved ? "🏁 " : (p.gaveUp ? "🏳️ " : "");
+      row.textContent = flag + (p.name || "Player")
+        + (this.mode === "versus" ? ` · ${p.pct || 0}% · ${p.guesses || 0} · ${p.score || 0}` : "");
+      list.appendChild(row);
+    });
+  },
+};
+
+// Drop daily-progress keys older than ~60 days so localStorage doesn't grow without
+// bound (one key per (date, wiki) ever played). The state key is "redigeerdle:daily:"
+// + id, where id starts with the puzzle's date (YYYY-MM-DD, optionally ":wiki"); keys we
+// can't parse a date from are left untouched. Best-effort — never blocks boot.
+function pruneOldDailyState() {
+  try {
+    const prefix = "redigeerdle:daily:";
+    const cutoff = ymdMinus(todayLocal(), 60);
+    const drop = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith(prefix)) continue;
+      const m = k.slice(prefix.length).match(/^(\d{4}-\d{2}-\d{2})/);
+      if (m && m[1] < cutoff) drop.push(k);   // YYYY-MM-DD compares correctly as a string
+    }
+    drop.forEach(k => localStorage.removeItem(k));
+  } catch { /* storage blocked / unavailable — nothing to prune */ }
+}
+
 // boot: a shared link reproduces the exact same puzzle; otherwise the homepage daily.
 // `?g=` is the opaque custom token (hides the fandom); `?wiki=&rev=` is the old
 // legible format, still honoured so links shared before the change keep working.
@@ -2915,8 +3497,14 @@ else mqMobile.addListener(onMobileMqChange);
 // general daily by default, or a followed fandom if they picked one.
 (function boot() {
   loadPrefs();   // dark mode is already applied by the head script; this loads auto-scroll
+  pruneOldDailyState();   // tidy up daily-state keys older than ~60 days
   initAuth();
   const q = new URLSearchParams(location.search);
+  // a multiplayer invite — overrides resume. Requires a real account: if not signed in
+  // yet (initAuth is async / a guest session), gate behind sign-in and join once onAuth
+  // sees a real user (consumePendingRoom). ?room= is opaque; the article arrives over the channel.
+  const room = q.get("room");
+  if (room) { pendingRoom = room; if (isRealUser()) consumePendingRoom(); else needSignIn(); return; }
   const g = q.get("g");
   const decoded = g ? decodeCustom(g) : null;
   const wiki = decoded ? decoded.wiki : q.get("wiki");

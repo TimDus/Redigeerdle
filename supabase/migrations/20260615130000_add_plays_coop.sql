@@ -1,0 +1,14 @@
+-- ============================================================================
+--  plays.coop — was this game played in CO-OP (a shared board)?
+--
+--  Random/custom co-op games already carry game_type='coop', so they're isolated
+--  in stats on their own. But a DAILY converted to co-op must STAY a daily (it keeps
+--  game_type='featured_daily'/'fandom_daily' so it still counts in daily stats and the
+--  daily completion aggregate, and stays replay-blocked) — this flag is how we remember
+--  it was done co-op without losing its daily identity.
+--
+--  Deploy ordering: index.html's recordPlay writes this column, so push this migration
+--  BEFORE shipping the updated client (otherwise every plays upsert fails on the unknown
+--  column and stats logging silently stops — recordPlay is best-effort).
+-- ============================================================================
+alter table public.plays add column if not exists coop boolean not null default false;

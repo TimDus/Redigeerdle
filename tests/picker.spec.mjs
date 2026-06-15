@@ -78,4 +78,22 @@ test.describe("leaksTitle — reject AI hints that give the answer away", () => 
     // Documents the deliberately strict behaviour.
     expect(leaksTitle("A Cat", "This category of animal is common.")).toBe(true);
   });
+
+  // accents / non-Latin: the app supports any-language MediaWiki, so the filter
+  // must fold diacritics and match Unicode letters — not just ASCII [a-z].
+  test("catches an accented title word regardless of how the hint accents it", () => {
+    expect(leaksTitle("Pokémon", "This Pokémon is an electric creature.")).toBe(true);
+    expect(leaksTitle("Pokemon", "A Pokémon trainer appears.")).toBe(true);
+    expect(leaksTitle("Beyoncé", "Beyonce released a new album.")).toBe(true);
+  });
+
+  test("does not leak when an accented title is described in general terms", () => {
+    expect(leaksTitle("Pokémon", "A franchise about collectible creatures.")).toBe(false);
+  });
+
+  test("catches a non-Latin (Cyrillic/CJK) title word — used to be a silent no-op", () => {
+    // ASCII-only matching produced ZERO guard words here, so any hint passed.
+    expect(leaksTitle("Война", "Это книга про войну. Война и мир.")).toBe(true);
+    expect(leaksTitle("東京タワー", "ランドマークは東京タワーです。")).toBe(true);
+  });
 });
