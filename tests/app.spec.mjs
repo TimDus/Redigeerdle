@@ -122,6 +122,26 @@ test("a solved daily stays solved after reload", async ({ page }) => {
   await expect(page.locator("#revealBtn")).toBeDisabled();   // hint controls stay locked too
 });
 
+// A solo (random/custom) game must resume on a plain reload — the same article AND its
+// progress — instead of jumping to the daily. Only a NEW local day routes to the daily.
+test("a solo random/custom game resumes its article + progress on reload", async ({ page }) => {
+  // load a solo (custom) game — a pinned HP revision — then make a guess that reveals a word
+  await page.evaluate(([wiki, rev]) => loadFromRevision(wiki, rev), ["harrypotter.fandom.com", 2006074]);
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+  await page.fill("#guess", "snitch"); await page.press("#guess", "Enter");
+  await expect(page.locator('.red.shown:has-text("Snitch")').first()).toBeVisible();
+  await expect(page.locator("#history .row")).toHaveCount(1);
+
+  // a plain reload (no query params) resumes THIS solo game, not the daily
+  await page.reload();
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+  await expect(page.locator("#status")).toContainText("Resumed your progress");
+  await expect(page.locator("#history .row")).toHaveCount(1);          // the guess came back
+  await expect(page.locator('.red.shown:has-text("Snitch")').first()).toBeVisible();  // and its reveal
+  // it's the solo game (custom), not a daily — Daily metrics don't apply
+  expect(await page.evaluate(() => currentShare.kind)).toBe("custom");
+});
+
 test("the guess field shows a live letter count", async ({ page }) => {
   await expect(page.locator("#guesscount")).toHaveText(""); // empty to start
   await page.fill("#guess", "snitch");
@@ -177,7 +197,7 @@ test("score adds a time penalty: +1 for every full 10s of active play", async ({
   await page.evaluate(() => { gameFinishedAt = Date.now(); const before = playActiveMs; accruePlayTime(); if (playActiveMs !== before) throw new Error("clock kept ticking after finish"); });
 });
 
-test("synonym tier: reveals the AI synonym, costs +30, and shows in the share", async ({ page }) => {
+test("synonym tier: reveals the AI synonym, costs +50, and shows in the share", async ({ page }) => {
   // the stubbed hint function returns no packet here, so inject one carrying a synonym
   await page.evaluate(() => { hints = { category: "", summary: "", synonym: "Automobile", first_letter: "" }; });
   await page.click("#hintsBtn");
@@ -187,13 +207,123 @@ test("synonym tier: reveals the AI synonym, costs +30, and shows in the share", 
   await row.locator(".hint-reveal").click();
   await expect(row.locator(".hint-tier-val")).toContainText("Automobile");
 
-  // it's the priciest tier: +30 (no guesses, time zeroed so the pill is exactly the tier cost)
+  // it's the priciest tier: +50 (no guesses, time zeroed so the pill is exactly the tier cost)
   await page.evaluate(() => { playActiveMs = 0; playTickAt = 0; updateScore(); });
-  await expect(page.locator("#scoreVal")).toHaveText("30");
+  await expect(page.locator("#scoreVal")).toHaveText("50");
 
   // and it surfaces in the share breakdown with its own icon
   const share = await page.evaluate(() => buildShareText());
   expect(share).toContain("🔁 synonym");
+});
+
+test("a chosen-fandom source is shown but FREE — it isn't scored or listed as a used hint", async ({ page }) => {
+  // playing a specific fandom (feed follow-card / 'Random from a fandom') reveals the source
+  // for free — revealSource(true) marks it pre-known. Zero out time so the pill is exact.
+  await page.evaluate(() => { revealSource(true); playActiveMs = 0; playTickAt = 0; updateScore(); });
+  expect(await page.evaluate(() => fandomUsed)).toBe(true);    // the source IS shown (you chose the fandom)
+  await expect(page.locator("#scoreVal")).toHaveText("0");     // …but it adds nothing to the score
+  expect(await page.evaluate(() => buildShareText())).not.toContain("🏷️");   // and isn't a used hint in the share
+
+  // contrast: a PAID source reveal (a featured/random game where the source was hidden) costs +10
+  await page.evaluate(() => { sourceFree = false; updateScore(); });
+  await expect(page.locator("#scoreVal")).toHaveText("10");
+  expect(await page.evaluate(() => buildShareText())).toContain("🏷️ source");
+});
+
+test("Letters tier: each reveal uncovers the next title letter at an escalating cost", async ({ page }) => {
+  await page.click("#hintsBtn");
+  const row = page.locator('.hint-tier[data-tier="first_letter"]');
+  // first letter costs +20 (same as the old single first-letter tier); the mask appears
+  await row.locator(".hint-reveal").click();
+  await page.evaluate(() => { playActiveMs = 0; playTickAt = 0; updateScore(); });
+  expect(await page.evaluate(() => computeScore())).toBe(20);
+  await expect(row.locator(".hint-tier-val")).toContainText("Title:");
+  // the button now offers the NEXT letter at the escalated +25
+  await expect(row.locator(".hint-reveal")).toContainText("+25");
+  // two more letters → 20 + 25 + 30 = 75, and the title mask fills in (Golden Snitch → "Gol…")
+  await row.locator(".hint-reveal").click();
+  await row.locator(".hint-reveal").click();
+  await page.evaluate(() => { playActiveMs = 0; playTickAt = 0; updateScore(); });
+  expect(await page.evaluate(() => computeScore())).toBe(75);
+  expect(await page.evaluate(() => lettersRevealed)).toBe(3);
+  await expect(row.locator(".hint-tier-val")).toContainText("Gol");
+  // the share breaks it down with the live count, not a generic label
+  expect(await page.evaluate(() => buildShareText())).toContain("🔤 3 letters");
+});
+
+test("Letters tier un-redacts the actual title; reveals are PINNED (no free re-flow) but the price keeps escalating", async ({ page }) => {
+  // reveal two letters → the REAL title at the top un-redacts them (not just the panel mask)
+  await page.click("#hintsBtn");
+  const lettersBtn = page.locator('.hint-tier[data-tier="first_letter"] .hint-reveal');
+  await lettersBtn.click();
+  await lettersBtn.click();
+  // "Golden Snitch" → the first hidden word gets the letters: "Go" shown inside #title
+  await expect(page.locator("#title .letterlit").first()).toHaveText("Go");
+
+  // now GUESS that first title word. The two paid letters were PINNED to "Golden" — they must
+  // NOT jump to "Snitch" and hand you a free letter there.
+  await page.fill("#guess", "golden"); await page.press("#guess", "Enter");
+  await expect(page.locator("#title .red.shown").filter({ hasText: "Golden" }).first()).toBeVisible();
+  await expect(page.locator("#title .letterlit")).toHaveCount(0);   // no free letter on Snitch
+  // the panel mask agrees: Golden fully shown, Snitch fully masked still
+  await expect(page.locator('.hint-tier[data-tier="first_letter"] .hint-tier-val')).toContainText("Golden ___");
+  // the purchase count (and so the cost) is unchanged by the guess…
+  expect(await page.evaluate(() => lettersRevealed)).toBe(2);
+  // …and the NEXT letter still costs the escalated +30 (a 3rd purchase), not a reset +20
+  await expect(lettersBtn).toContainText("+30");
+
+  // buying it now reveals the first letter of Snitch — paid for, not free
+  await lettersBtn.click();
+  await expect(page.locator("#title .letterlit")).toHaveText("S");
+  expect(await page.evaluate(() => lettersRevealed)).toBe(3);
+});
+
+test("First sentence tier: reveals the lead sentence in place but keeps title words blacked", async ({ page }) => {
+  await page.click("#hintsBtn");
+  const row = page.locator('.hint-tier[data-tier="first_sentence"]');
+  await expect(row.locator(".hint-reveal")).toContainText("+");   // priced before purchase
+  await row.locator(".hint-reveal").click();
+  // the panel shows the lead sentence (a distinctive non-title word from the Golden Snitch lead)…
+  await expect(row.locator(".hint-tier-val")).toContainText("Quidditch");
+  // …with the title spelled out NOWHERE (title words stay masked)
+  await expect(row.locator(".hint-tier-val")).not.toContainText("Golden Snitch");
+  // it un-redacts those lead words in the article body too
+  await expect(page.locator("#body .red.shown").filter({ hasText: "Quidditch" }).first()).toBeVisible();
+  expect(await page.evaluate(() => firstSentenceUsed)).toBe(true);
+  expect(await page.evaluate(() => buildShareText())).toContain("📖 first sentence");
+});
+
+test("First sentence tier: live cost is +3 per still-hidden word and drops as you guess them", async ({ page }) => {
+  await page.click("#hintsBtn");
+  const btn = page.locator('.hint-tier[data-tier="first_sentence"] .hint-reveal');
+  const costOf = async () => parseInt((await btn.textContent()).match(/\+(\d+)/)[1], 10);
+  const hidden = () => page.evaluate(() => firstSentenceHiddenCount());
+
+  // priced at exactly 3 per still-hidden non-title word it would uncover (no base)
+  expect(await costOf()).toBe((await hidden()) * 3);
+
+  // guessing a lead-sentence word un-redacts it, so the tier no longer has to uncover it —
+  // the live button cost ticks down (−3 per now-revealed word) WITHOUT re-opening the panel
+  const before = await costOf();
+  await page.fill("#guess", "Quidditch"); await page.press("#guess", "Enter");
+  const after = await costOf();
+  expect(after).toBeLessThan(before);
+  expect(after).toBe((await hidden()) * 3);   // still exactly 3 × what remains hidden
+});
+
+test("Letters + first-sentence tiers survive a reload", async ({ page }) => {
+  await page.click("#hintsBtn");
+  await page.locator('.hint-tier[data-tier="first_letter"] .hint-reveal').click();
+  await page.locator('.hint-tier[data-tier="first_letter"] .hint-reveal').click();
+  await page.locator('.hint-tier[data-tier="first_sentence"] .hint-reveal').click();
+  await page.reload();
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+  // the panel re-renders from saved state: the letter count and the revealed sentence both return
+  expect(await page.evaluate(() => lettersRevealed)).toBe(2);
+  expect(await page.evaluate(() => firstSentenceUsed)).toBe(true);
+  await expect(page.locator('.hint-tier[data-tier="first_sentence"] .hint-tier-val')).toContainText("Quidditch");
+  // and the body still shows the lead sentence un-redacted after the reload
+  await expect(page.locator("#body .red.shown").filter({ hasText: "Quidditch" }).first()).toBeVisible();
 });
 
 test("used hints survive a reload (summary comes back, reflected in share)", async ({ page, context }) => {

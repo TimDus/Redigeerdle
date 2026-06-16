@@ -107,12 +107,18 @@ async function generate(title: string, text: string): Promise<string> {
     + "  \"category\": 3-6 words naming the general KIND of subject (e.g. 'A fictional character', "
     + "'A historical battle', 'A type of food'). No proper nouns.\n"
     + "  \"summary\": one vague sentence, max 18 words, describing the subject in general terms.\n"
-    + "  \"synonym\": 1-4 words giving a SYNONYM or near-equivalent of the title's main word(s) — "
-    + "another way to say the same thing — but NEVER the title word itself or an obvious variant of it. "
-    + "If the title is a proper name, give a synonymous term for what it fundamentally is.\n"
+    + "  \"synonym\": the MOST revealing hint — get as close and literal to the title's meaning as the "
+    + "no-leak rule allows (~1-5 words). Replace any PROPER NAME in the title (person, character, place, "
+    + "organisation) — EVEN when it is only PART of a longer phrase — with a generic word for its KIND "
+    + "(a personal name -> \"a character\"/\"a person\", a place -> \"a place\", an org -> "
+    + "\"an organisation\"), and give a close synonym for the remaining common words; combine them "
+    + "naturally. Examples: \"Bob's Diary\" -> \"a character's journal\"; \"Battle of Hastings\" -> "
+    + "\"a historic clash at a place\"; a title that is ONLY a name -> \"a person's name\" / "
+    + "\"a place name\". NEVER include a title word or an obvious variant.\n"
     + "Rules for ALL fields: NEVER write the title or any of its words, names, or close variants; "
     + "avoid proper nouns. `category` and `summary` must be evocative but NOT identifying; `synonym` "
-    + "MAY be close in meaning (that is its purpose) but must still not contain a title word. "
+    + "should be as literal and close in meaning as possible (it is the highest-cost, most revealing tier) "
+    + "but must still not literally contain a title word. "
     + "Output ONLY the JSON object, nothing else.";
   const user = `Title (the answer — never mention it or its words): "${title}"\n\n`
     + `Article excerpt:\n${String(text).slice(0, 1500)}\n\nReturn the JSON object.`;

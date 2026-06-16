@@ -40,12 +40,22 @@ a standalone Node script run by GitHub Actions.
   free tier's 12K TPM / 30 RPM, and the article excerpt is capped at 1500 chars). The
   model writes `category` + `summary` + `synonym` (`response_format: json_object`);
   **`first_letter` is computed server-side** from the authoritative title (never trusted
-  to the model), and is the one tier the per-field leak filter skips. (Both the server
-  `firstLetterOf` and the client `firstLetterHint` match a Unicode letter/number, so an
-  accented/non-Latin title reports its real first character.) **`synonym`** is a 1-4 word
-  near-equivalent of the title's main word(s) — deliberately the most revealing AI tier
-  (costs **+30**, see **Score**) — but it still goes through the per-field leak filter, so
-  it can be close in meaning yet never literally contains a title word. The JSON string is
+  to the model), and is the one tier the per-field leak filter skips. (The server's
+  `firstLetterOf` matches a Unicode letter/number so an accented/non-Latin title reports
+  its real first character. The packet's `first_letter` field is now **unused client-side**
+  — the client's **Letters** tier derives letters locally via `lettersHint`, same Unicode
+  matching; the server still computes the field, harmlessly.) **`synonym`** is a tight,
+  deliberately-literal near-equivalent of the title's main word(s) — the most revealing AI
+  tier (costs **+50**, see **Score**). The prompt pushes it as close to the answer's meaning
+  as the leak filter allows, and is **name-aware even for names embedded in a phrase**: it
+  replaces any proper name *part* of the title with a generic word for its kind (a personal
+  name → "a character"/"a person", a place → "a place", an org → "an organisation") and
+  synonymises the remaining common words, combining them naturally — e.g. *"Bob's Diary"* →
+  *"a character's journal"*, while a title that is **only** a name → "a person's name" / "a
+  place name". (Synonymising the common noun isn't just nicer — it's what lets the field
+  survive the leak filter, since the literal title word would be blanked.) It still goes
+  through the per-field leak filter,
+  so it can be close in meaning yet never literally contains a title word. The JSON string is
   stored verbatim in **`puzzles.summary`** (still a `text` column — no migration) and
   parsed client-side (`parseHintPacket`, which also copes with **legacy plain-sentence**
   summaries, the [puzzle.json](puzzle.json) fallback by treating the whole string as the
@@ -59,16 +69,57 @@ a standalone Node script run by GitHub Actions.
   Random/custom games call the same function with no `puzzleId` → generate, no cache.
   **UI** ([index.html](index.html)): a single **"Hints"** button (`#hintsBtn`, next to
   "Reveal a word") opens the `#hintbox` panel, rebuilt by **`renderHints()`** — one row
-  per tier, least→most revealing: **Category → Summary → First letter → Synonym →
-  Source**. Each tier has its own **Reveal** button (`revealTier(key)`); `first_letter` is
-  derived locally (`firstLetterHint()`, instant — no fetch even if the AI hint never
-  landed), `synonym` (like category/summary) comes from the AI packet (revealed instantly
-  if already fetched, else lazily generated), and **Source** folds in the old `showFandom`
-  (`revealSource()` / `fandomUsed`). Which AI/
-  letter tiers were shown is tracked in **`hintTiers`** (persisted in the daily
-  localStorage state and restored into the panel); `summaryUsed` stays the rollup boolean
-  (any AI/letter tier used) for the `plays` `summary_used` column, `fandomUsed`/
-  `source_used` for **Source**. **The leak filter now runs per field** (blank only the
+  per tier, least→most revealing: **Category → Summary → First sentence → Letters →
+  Synonym → Source**. Each tier has its own **Reveal** button (`revealTier(key)`) whose
+  label shows the next purchase cost (`nextRevealCost(key)`). `category`/`summary`/`synonym`
+  come from the AI packet (revealed instantly if already fetched, else lazily generated);
+  **First sentence** and **Letters** are **derived locally from the article + title** (no
+  Groq, no leak filter — see below); **Source** folds in the old `showFandom`
+  (`revealSource()` / `fandomUsed`).
+  - **First sentence** (`first_sentence`, `revealFirstSentenceHint`): reveals the article's
+    lead sentence **in place** — its non-title words un-redact in the body
+    (`paintFirstSentenceTokens` reveals the *specific token objects*, not by key, so the
+    same words elsewhere stay hidden) and the panel mirrors it as text (`firstSentenceText`,
+    for mobile where the modal covers the article). **TITLE words stay blacked** so it's a
+    strong clue, never a giveaway. `firstSentenceSlice` cuts at the first `.`/`!`/`?`
+    followed by space/end with a preceding word ≥3 chars (so "J. K." doesn't cut early).
+    One-shot; cost is **`+3` per still-hidden word it would uncover** (`firstSentencePer`, no
+    base), so it scales with how much is left to reveal and is **locked at purchase**
+    (`firstSentenceWords`). The live price is **dynamic in the panel** — guessing a word that
+    sits in the lead sentence un-redacts it, so the displayed Reveal cost ticks down by 3 (the
+    post-guess `applyGuess` re-renders the open Hints panel when the guess hit a first-sentence
+    non-title word; `nextRevealCost` reads the live `firstSentenceHiddenCount`).
+  - **Letters** (`first_letter`, **repeatable**, `revealNextLetter`): each click reveals the
+    next title letter. It **un-redacts the letters in the ACTUAL title `#title` at the top**
+    (not just a panel mask): a partly-lit title word renders its revealed prefix as text
+    (`.letterlit`, a subtle marker underline so it reads as a hint, not a guess) and boxes only
+    the still-hidden remainder (`buildPartialTitleSpan`). The panel still mirrors it as a
+    hangman mask (`lettersHint`, e.g. `Title: Gol___ ______`) for mobile where the modal covers
+    the article. **Reveals are PINNED per word, NOT a flowing count**: each title word token
+    carries its own locked `t.lit` count, and a buy lights the first *still-hidden* word that
+    isn't fully lit (`nextLitTarget()` — stop/guessed words are skipped, so it naturally moves
+    to the next word once one is fully lit or guessed). Crucially, a letter does **not re-flow**:
+    if you then guess the word it sat in, that word shows fully but its bought letters do **not**
+    jump to the next word and hand you a free letter there — you'd pay again for that one (the
+    earlier bug). The cost still escalates monotonically off **`lettersRevealed`** (the *purchase
+    count*, first letter +20, letter *n* = `letterBase + (n-1)*letterStep`), which only ever goes
+    up — so a guess never refunds or resets the price (`lettersRevealed` and the visible
+    per-word lit can diverge: a letter "wasted" on a then-guessed word still counts toward cost).
+    The per-word lit is persisted/synced separately as **`letterLits`** (`letterLitsSnapshot()` /
+    `applyLetterLits()`; a pre-`letterLits` save/sync falls back to `distributeLettersFallback`).
+    `applyGuess` only refreshes the open panel mask on a title-word guess (the title span is
+    handled by `revealKey`; nothing re-flows). Letters never mark a word `revealed` (purely a
+    visual hint — solving still needs the guess/free-reveal). Replaces the old single
+    first-letter tier. All local from the title.
+
+  Which tiers were shown is tracked in **`hintTiers`** (persisted in the daily localStorage
+  state and restored into the panel) — for the two derived tiers `lettersRevealed` /
+  `letterLits` / `firstSentenceUsed` / `firstSentenceWords` are persisted **alongside** it and
+  restored (`paintFirstSentenceTokens` re-reveals the sentence body on resume; `applyLetterLits`
+  re-pins the per-word reveals — or `distributeLettersFallback` for a pre-`letterLits` save;
+  back-compat: a pre-counter save with `first_letter` in `hintTiers` → `lettersRevealed = 1`).
+  `summaryUsed` stays the rollup boolean (any AI/derived tier used) for the `plays`
+  `summary_used` column, `fandomUsed`/`source_used` for **Source**. **The leak filter now runs per field** (blank only the
   leaking tier, keep the rest) in the Edge Function — still mirrored against
   `scripts/lib/leak-filter.mjs`.
   **Anti-poisoning**: the cached daily path does **not** trust the caller-supplied
@@ -107,9 +158,10 @@ the target rewrite the text). Three lines under the headline:
   any guesses). Omitted when there are no typed guesses yet (reveals/hints only).
 - the exact counts line: `✅ N good  ❌ N bad  💡 N reveal(s)`.
 - a **per-tier hint breakdown** — one icon+label per hint actually used, in the same
-  least→most order as the Hints panel: **📂 category · 📄 summary · 🔤 first letter ·
-  🔁 synonym · 🏷️ source** (`SHARE_ICON` + `HINT_TIERS`, gated on `hintTiers` /
-  `fandomUsed`). This replaced the old single generic `📄 hints` marker — when you add a
+  least→most order as the Hints panel: **📂 category · 📄 summary · 📖 first sentence ·
+  🔤 N letters · 🔁 synonym · 🏷️ source** (`SHARE_ICON` + `HINT_TIERS`, gated on
+  `hintTiers` / `fandomUsed`). The Letters entry shows the **live count** (`🔤 3 letters`),
+  not a generic label. This replaced the old single generic `📄 hints` marker — when you add a
   hint tier, add its icon to `SHARE_ICON` so it shows here too.
 
 - a **score line** — `🎯 Score N (lower is better)` (see **Score** below).
@@ -123,13 +175,36 @@ way (the source wiki is itself a paid hint). Covered by the two share tests in
 A golf-style score: **the goal is the lowest total**. A correct typed guess is free
 (`+0`); every bit of help — **and time** — adds points: **`+1` for every full 10 seconds
 of active play** (`SCORE.per10s`), **wrong guess `+1`, free word reveal `+5`, the
-**source** / **summary** / **category** hint tiers `+10` each, the **first-letter** tier
-`+20`, the **synonym** tier `+30` (the most revealing). The point values live in the
-`SCORE` map and `computeScore()` derives the total
+**source** / **summary** / **category** hint tiers `+10` each, the **synonym** tier `+50`
+(the most revealing AI tier). Two derived tiers cost dynamically: the **first-sentence**
+tier is `firstSentencePer` (`+3`) **per still-hidden word it uncovers** (`firstSentenceBase`
+is `0`), locked at purchase in `firstSentenceWords` (its live panel price drops by 3 as you
+guess words in the sentence); the **Letters** tier escalates —
+letter *n* costs `letterBase + (n-1)*letterStep` (`+20, +25, +30, …`), so `letterCost(k)`
+sums the first `k` (the first letter still costs `+20`, matching the old single tier). The
+point values live in the `SCORE` map and `computeScore()` derives the total
 **purely from the same play state the share line uses** (`guesses` → bad/reveal counts,
-`hintTiers`, `fandomUsed`, plus `playActiveMs`) — so the live pill, the share text and the
-win/give-up banner can never disagree (no separately-tracked counter to drift).
-`computeScore()` is defined next to `buildShareText()`.
+`hintTiers`, `fandomUsed`, `lettersRevealed`, `firstSentenceUsed`/`firstSentenceWords`,
+plus `playActiveMs`) — so the live pill, the share text and the win/give-up banner can
+never disagree (no separately-tracked counter to drift). `computeScore()` is defined next
+to `buildShareText()`. NB `first_letter`/`first_sentence` are **skipped** in the flat
+`hintTiers` cost loop — they're costed from their own counters.
+
+**The Source tier is FREE when the player chose the fandom.** When a game starts with the
+source already revealed because the player explicitly picked that fandom — a feed
+follow-card daily (`fandom_daily`) or **Random from a fandom** (`fandom_random`), both
+loaded with `revealFandom:true` → `revealSource(true)` — the source isn't a hint they
+spent, so it must NOT add `SCORE.source`. The auto-reveal sets a `sourceFree` flag
+(distinct from `fandomUsed`, which only means "the source is shown"); **`sourceCharged()`
+= `fandomUsed && !sourceFree`** is the single predicate for "source counted as a paid
+hint" and is used **everywhere** the source is a spent hint: `computeScore()` (the `+10`),
+the share breakdown's 🏷️ marker + its no-activity early-return, and `recordPlay`'s
+`source_used` (so a chosen-fandom solve can still be a **clean solve**). It is reset in
+`initGame`, **persisted in the saved state** (so a same-day reload keeps it free — important
+because the resume path `loadDailyForWiki`/`loadFromRevision` doesn't re-pass `revealFandom`),
+and **synced in co-op** (`_sendSync`/`_applySync` carry `sourceFree` so a joiner inherits
+the host's free source). A *manual* panel reveal — `revealTier("source")` → `revealSource()`
+with no arg — stays a paid `+10` (featured/full/curated games where the source was hidden).
 
 **The time component counts ACTIVE play, not wall-clock.** It's `floor(playActiveMs /
 10000) * SCORE.per10s` (currently `+1` per 10s), where `playActiveMs` accrues **only while the game is live AND the tab is
@@ -214,7 +289,18 @@ presence — already bundled in `supabase-js@2`, otherwise unused). **Requires a
   `hint {tier, packet}` (in `addTier`/`revealSource`). Incoming events are applied with
   `applyGuess(…, /*remote*/true)` so they **never re-broadcast** (no echo loop). The hint
   **packet travels verbatim**, so a teammate revealing a tier costs **no extra Groq call**
-  (respects the per-minute limit). **Every** co-op guess is credited via `g.by` (your own name
+  (respects the per-minute limit). The two **locally-derived** tiers ride the same `hint`
+  event: **Letters** carries both its `letters` purchase count AND the `litMask` (the PINNED
+  per-word reveals, `letterLitsSnapshot()`); `_applyRemoteHint` catches `lettersRevealed` up via
+  `max`, `applyLetterLits(litMask, /*mergeMax*/true)`, then `drawTitle()`s so the exact same
+  letters light up in the receiver's title (and stay pinned there too — no re-flow on either
+  side). **First sentence** carries only the tier name — the receiver re-runs
+  `paintFirstSentenceTokens` on its shared board (same article → same reveal). A late joiner's
+  `sync` also carries `lettersRevealed`/`letterLits`/`firstSentenceUsed` (`_applySync` applies
+  the mask + `drawTitle()`s). Because the per-word lit is shared verbatim (not re-derived), the
+  Letters tier is consistent across clients; a title-word guess — local or remote — runs
+  through `applyGuess` (which refreshes the open panel mask), and pinned letters never move.
+  **Every** co-op guess is credited via `g.by` (your own name
   for local guesses — `mpName()` — the sender's for remote ones via `mp._incomingBy`); the
   history row groups the hit-count + name in a right-aligned `.rmeta` span (name last) so the
   count never floats in the middle, all via `textContent` (never `innerHTML`). A late joiner
@@ -415,7 +501,9 @@ the header.
 
 - [tests/app.spec.mjs](tests/app.spec.mjs) — game UI. Stubs Supabase to **EMPTY**
   (`puzzles` → `[]`), so it exercises the graceful "Supabase absent → puzzle.json
-  fallback" paths.
+  fallback" paths. Includes the hint-tier tests: the **Letters** escalating-cost reveal,
+  the **First sentence** lead-sentence reveal (title words stay masked), and that both
+  survive a reload (against the deterministic Golden Snitch fallback).
 - [tests/supabase.spec.mjs](tests/supabase.spec.mjs) — Supabase happy paths. Mocks
   **POPULATED** REST responses so `loadPuzzle` (Supabase branch), `loadDailyMetrics`
   (the `daily_metrics` RPC anonymous aggregate **only** — the **"Daily metrics"** modal,
@@ -508,18 +596,41 @@ the dark-mode / auto-scroll prefs (`homeDailyPref()` / `setHomeDailyPref()`). A
 previously-chosen fandom that's since been unfollowed stays selectable (labelled "(not
 followed)") so the saved choice isn't silently lost.
 
-**Boot / resume order** (no special URL): every daily load stamps
-`localStorage` (`redigeerdle:lastdaily` = `{ wiki, day: todayLocal() }`) via
-`rememberLastDaily()`. On boot we **resume the last-opened daily, but only while it's still
-the same local day** (`last.day === todayLocal()`, `loadDailyForWiki(last.wiki)`); once the
-dailies roll over at local (Europe/Amsterdam) midnight, `last.day` no longer matches and we
-fall through to the **homepage daily** (`homeDailyPref` → `loadDailyForWiki(home)`, or the
-featured daily). So: reload mid-day → same puzzle you were on; first visit of a new day →
-your configured homepage daily. (`?p=daily` still forces the featured daily regardless;
-`?d=` shared links still open that fandom's daily directly.) Boot also runs
-`pruneOldDailyState()`, which drops `redigeerdle:daily:<id>` keys whose embedded date is
-older than ~60 days, so per-day/per-fandom progress state doesn't grow `localStorage`
-without bound (best-effort; unparseable keys are left alone).
+**Boot / resume order** (no special URL): **every** game load — a daily OR a solo
+random/custom game — stamps `localStorage` (`redigeerdle:lastgame`) via
+`rememberLastGame()`, called once in `loadArticle` (after `currentShare` is set, so it
+covers both branches). For a daily it stores `{ kind:"daily", wiki, day:todayLocal() }`; for
+a solo game it also stores the pinned `{ rev }` so `loadFromRevision` can reproduce the
+article. On boot we **resume the EXACT last-opened game — daily or solo — but only while
+it's still the same local day** (`last.day === todayLocal()`): solo →
+`loadFromRevision(last.wiki, last.rev)`, daily → `loadDailyForWiki(last.wiki)` (each falls
+back to `openHomeDaily()` if the load fails — `loadFromRevision` now returns a success
+boolean for this). Once the dailies roll over at local (Europe/Amsterdam) midnight,
+`last.day` no longer matches and we fall through to the **homepage daily** (`homeDailyPref`
+→ `loadDailyForWiki(home)`, or the featured daily). So: **reload mid-game → right back on the
+same article *with your progress*** (a random game stays a random game); **first visit of a
+new day → your configured homepage daily**. (`?p=daily` still forces the featured daily
+regardless; `?d=`/`?g=`/`?wiki=&rev=` shared links still open their target directly — and a
+`?g=` reload also resumes solo progress, since it routes through `loadFromRevision` too.)
+`lastGame()` reads the new key and **falls back to the legacy `redigeerdle:lastdaily`** so a
+player mid-daily across the upgrade still resumes.
+
+**Solo-game progress persistence.** Dailies persist progress per-puzzle
+(`redigeerdle:daily:<id>`, replayed by `restoreDailyState`); solo (random/custom) games now
+persist to **one** slot, `redigeerdle:sologame` (`SOLO_STATE_KEY`). There's only ever one
+"current" solo game, so a single slot is bounded (no growth) and naturally resumes only the
+most recent one. The saved blob carries `id` (`wiki@revision`, via `soloId()`) plus `playId`
++ `gameType`, so a resume **keeps the same `plays` row and `game_type`** (no duplicate
+play-log row). `saveDailyState()` is now generalized: it picks the key via `currentSaveKey()`
+(daily → per-puzzle, solo → `SOLO_STATE_KEY`) and writes for both. The replay logic is shared
+in **`replaySavedState(saved)`** — called by `restoreDailyState` (after its daily-only
+finished-marker / `restoreFinishedFromServer` checks) and by **`restoreSoloState()`**.
+`restoreSoloState` (called at the end of `loadArticle`'s custom branch) replays **only when
+`saved.id === soloId()`** — i.e. the slot holds THIS exact article — so a fresh game with a
+different revision falls through untouched; it has **no server path** (solo games aren't on
+the leaderboard, so there's nothing to re-lock). `pruneOldDailyState()` only touches
+date-prefixed `redigeerdle:daily:<id>` keys, so it leaves `redigeerdle:sologame` /
+`redigeerdle:lastgame` alone.
 
 Header layout: three groups — the **hamburger** (`#feedBtn`, opens the daily-feed drawer)
 at the far left, the **brand** (`.brand` — title + **New game** + **How to play**) above
@@ -776,7 +887,10 @@ solves that and also records `wiki` on every row, so later **per-fandom aggregat
   the current snapshot on sign-in / resume.
 - **`play_id` is the upsert key** (`unique(user_id, play_id)`), so repeated calls update
   ONE row. Dailies use `play_id = puzzle_id` (a same-day resume keeps the same row);
-  random/custom mint a fresh `play_id` per game (`mintPlayId()`), so each is its own row.
+  random/custom mint a fresh `play_id` per game (`mintPlayId()`), so each is its own row —
+  **but a same-day reload resume keeps it**: the minted id is persisted in
+  `redigeerdle:sologame` (`playId`) and `restoreSoloState` restores it into `currentPlayId`,
+  so a resumed solo game updates its existing row instead of logging a duplicate.
 - **`revealed_pct`** is derived from the **guesses** (sum of hits ÷ non-stop word count),
   NOT the token state — because `checkWin`/`giveUp` reveal every token, the live token
   state would always read 100%. So it honestly reflects how much the player uncovered
@@ -907,3 +1021,33 @@ Remaining open ideas: **per-fandom leaderboards** (repoint `scores` to `(user, w
 date)`); **public fandom-stats aggregates** over `plays` via a `security definer` RPC
 (keeps raw rows private); and whether the feed should ever require an account. All
 deferred.
+
+**Image hint tier** (deferred — next hint idea after First sentence + Letters): a
+**progressively-unblurred main image** as a new `#hintbox` tier. Fetch the article's lead
+image from MediaWiki (`prop=pageimages|pageprops`, e.g. `original`/`thumbnail` url) and
+show it heavily blurred; each click steps the blur down (e.g. 20px → 10px → 4px) at an
+escalating cost (like the Letters tier). Design notes for when it's built: **start at heavy
+blur** (the image often shows the subject outright — a hard leak), keep it **fully
+client-side** (no Groq/edge function, like First sentence + Letters), and treat the image
+url as **untrusted** on custom/shared `?wiki=&rev=` links (`safeHttpUrl()`, never
+`innerHTML`). Add its icon to `SHARE_ICON`, a cost to `SCORE`, and persist its
+blur-step/used state alongside `lettersRevealed`/`firstSentenceUsed`. Some articles have no
+lead image → the tier should hide (like First sentence when nothing's left to uncover).
+
+**Game archive** (deferred): a browsable list of **past dailies** so a player can play (or
+replay) days they missed. The data already exists — past dailies persist as `puzzles` rows
+(one per `(wiki, date)`), each a safe pointer (`{id, wiki, revision_id, date, is_featured}`,
+never the title), so the archive is essentially a **`puzzles` query for dates `< today`**
+filtered to the chosen source (e.g. featured, or a followed fandom). Design notes for when
+it's built: a row loads via the existing `loadPuzzlePointer`/`loadDailyForWiki` path keyed
+by **puzzle id** (so progress/replay-block stay per-puzzle); keep the **answer-privacy
+invariant** — list only pointers, and for a **featured** archive entry use the neutral
+"Featured daily" label + ⭐ icon (never the underlying wiki name, same as the feed's pinned
+card and My-stats source selector). Decide scoring/streak treatment up front: an archived
+play already greens the heatmap on its own `puzzle_date` (the heatmap keys by puzzle date,
+not play day), and `restoreFinishedFromServer` already re-locks a daily finished on another
+device — so an old daily the player solved before will show as completed; whether a *fresh*
+archive solve of the **featured** daily should still submit to the competitive `scores`
+leaderboard (probably **not**, to avoid back-dated entries) is the main open question. UI
+likely belongs in the feed drawer or a dedicated modal; a `?d=<id>`-style shareable link to
+a specific archived daily would fall out for free.

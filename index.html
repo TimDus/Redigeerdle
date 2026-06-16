@@ -278,6 +278,10 @@
   .red { display:inline-block; background:var(--bar); color:transparent; border-radius:2px; user-select:none; vertical-align:baseline; height:1.05em; line-height:1.05em; }
   .red .len { font-family:var(--mono); font-size:.7em; color:rgba(255,255,255,.55); padding:0 3px; }
   .shown { background:transparent; color:var(--ink); }
+  /* Letters-tier reveals laid over the title: the lit prefix reads as a hint (subtle
+     underline) so it's distinct from a word you actually guessed; the box child of a
+     partly-lit word hugs only the still-hidden letters. */
+  #title .letterlit { border-bottom:2px solid var(--marker); }
   /* the yellow marker keeps dark text in both themes (light text on yellow is unreadable) */
   .flash { background:var(--marker); color:#1a1a1a; transition:background 1.2s ease; }
   /* history navigation: every occurrence of the clicked word, and the active one */
@@ -613,7 +617,7 @@
   <div id="playarea">
     <div class="statusbar" id="statusbar">
       <div class="status" id="status">Loading puzzle…</div>
-      <div class="score" id="scorePill" title="Your score — lower is better. +1 for every 10 seconds, wrong guess +1, reveal a word +5, summary/category/source +10, first letter +20, synonym +30. Correct guesses are free.">Score: <b id="scoreVal">0</b></div>
+      <div class="score" id="scorePill" title="Your score — lower is better. +1 for every 10 seconds, wrong guess +1, reveal a word +5, summary/category/source +10, first sentence +3 per hidden word it reveals, each title letter +20 then +5 more each, synonym +50. Correct guesses are free.">Score: <b id="scoreVal">0</b></div>
       <div class="statusbtns">
         <button id="shareBtn">Share</button>
         <button id="inviteBtn" hidden>Invite (co-op)</button>
@@ -710,6 +714,17 @@ who whom whose what when where why how all any some more most such into over und
 after before between during without within up down out off`.split(/\s+/));
 
 let guesses, guessed, tokens, titleKeyWords, titleKeySet, titleStemSet, titleToks, bodyBlocks, META, hintsLeft, hints, hintTiers, hintLoading, revealArmed, solved, summaryUsed, fandomUsed, gaveUp;
+// sourceFree: the Source tier was revealed for FREE because the player explicitly chose this
+// fandom (a feed follow-card daily, or "Random from a fandom") — so it isn't a paid hint and
+// must NOT add SCORE.source to the final score (see sourceCharged()). Distinct from fandomUsed
+// (which only tracks that the source is shown). Persisted so a reload keeps it free.
+let sourceFree = false;
+// the escalating "Letters" hint tier: how many title letters (reading order) are revealed
+// so far. Each reveal costs more (SCORE.letterBase + n*letterStep). Persisted across daily resumes.
+let lettersRevealed = 0;
+// the "First sentence" hint tier: whether it's been bought, and how many still-hidden words
+// it uncovered at purchase (the locked per-word cost). Persisted across daily resumes.
+let firstSentenceUsed = false, firstSentenceWords = 0;
 const EMPTY_HINTS = { category: "", summary: "", synonym: "", first_letter: "" };
 // true when the current daily was restored as *already finished* from the server
 // (solved/gave up on another device, or as a now-merged guest) with no local guess
@@ -765,16 +780,42 @@ function buildSpan(t, showLen) {
   const span = document.createElement("span");
   span.dataset.key = t.key;
   t.el = span;
-  if (t.revealed) { span.className = "red shown"; span.textContent = t.word; }
-  else {
-    // only the length goes into the DOM, not the word
-    span.className = "red";
-    if (t.region === "body" && !isTitleWord(t.key)) span.classList.add("revealable");
-    // box width tracks the word length (the gameplay hint) but hugs the word: no
-    // flat trailing cushion, and ~0.55em/char ≈ the serif body's average glyph, so
-    // the bar doesn't run past the hidden word. Floor keeps the length tag readable.
-    span.style.width = Math.max(t.word.length * 0.55, 0.9) + "em";
-    if (showLen) { const l = document.createElement("span"); l.className="len"; l.textContent=t.word.length; span.appendChild(l); }
+  if (t.revealed) { span.className = "red shown"; span.textContent = t.word; return span; }
+  // a title word with some letters lit by the Letters tier: show the revealed prefix as
+  // text and box only the still-hidden remainder (letters reveal left-to-right, pinned).
+  if (t.region === "title" && t.lit > 0) return buildPartialTitleSpan(t, span, t.lit, showLen);
+  // only the length goes into the DOM, not the word
+  span.className = "red";
+  if (t.region === "body" && !isTitleWord(t.key)) span.classList.add("revealable");
+  // box width tracks the word length (the gameplay hint) but hugs the word: no
+  // flat trailing cushion, and ~0.55em/char ≈ the serif body's average glyph, so
+  // the bar doesn't run past the hidden word. Floor keeps the length tag readable.
+  span.style.width = Math.max(t.word.length * 0.55, 0.9) + "em";
+  if (showLen) { const l = document.createElement("span"); l.className="len"; l.textContent=t.word.length; span.appendChild(l); }
+  return span;
+}
+
+// render a partially letter-revealed title word: the first `lit` letters shown as text
+// (marked `.letterlit` so they read as a hint, not a guess), the rest as a shrinking box.
+function buildPartialTitleSpan(t, span, lit, showLen) {
+  span.className = "";   // transparent inline wrapper — the box child carries the redaction bar
+  const chars = [...t.word];
+  let seen = 0, cut = chars.length;
+  for (let i = 0; i < chars.length; i++) {
+    if (/[\p{L}\p{N}]/u.test(chars[i])) { seen++; if (seen >= lit) { cut = i + 1; break; } }
+  }
+  const pre = document.createElement("span");
+  pre.className = "red shown letterlit";
+  pre.textContent = chars.slice(0, cut).join("");
+  span.appendChild(pre);
+  const rest = chars.slice(cut).join("");
+  if (rest) {
+    const hidden = revealableCount(rest);
+    const box = document.createElement("span");
+    box.className = "red";
+    box.style.width = Math.max(hidden * 0.55, 0.6) + "em";
+    if (showLen) { const l = document.createElement("span"); l.className = "len"; l.textContent = hidden; box.appendChild(l); }
+    span.appendChild(box);
   }
   return span;
 }
@@ -812,6 +853,10 @@ function draw() {
   const showLen = document.getElementById("lens").checked;   // read once, not per block
   renderToks(document.getElementById("title"), titleToks, showLen);
   renderBlocks(document.getElementById("body"), bodyBlocks, showLen);
+}
+// repaint just the title (cheap) — used when a letter reveal un-redacts the next letter.
+function drawTitle() {
+  renderToks(document.getElementById("title"), titleToks, document.getElementById("lens").checked);
 }
 
 // reveal just the tokens for one key in place — avoids re-rendering the whole
@@ -892,7 +937,9 @@ function refreshMeta() {
 function updateInviteBtn() {
   const b = document.getElementById("inviteBtn"); if (!b) return;
   const rev = currentShare.rev || (META && META.source && META.source.revision_id);
-  b.hidden = !(isRealUser() && currentShare.wiki && rev && !mp.active);
+  // hide once the game is over (solved / gave up) — there's nothing left to co-op on,
+  // and converting a finished board to a room would be misleading.
+  b.hidden = !(isRealUser() && currentShare.wiki && rev && !mp.active && !solved && !gaveUp);
 }
 
 // only http(s) urls are safe to put in an href — a custom/shared link can point at
@@ -1009,7 +1056,17 @@ function applyGuess(key, raw, isHint, remote) {
   // sender's for remote) so the history credits everyone, not just teammates
   if (mp.active && mp.mode === "coop" && guesses.length)
     guesses[guesses.length - 1].by = remote ? (mp._incomingBy || null) : mpName();
-  revealKey(key); flashKey(key); refreshMeta(); checkWin();
+  revealKey(key);
+  // Refresh the open Hints panel after a guess. A guessed title word becomes fully shown
+  // (revealKey painted its title span); Letters-tier reveals are PINNED per word, so nothing
+  // re-flows — we just refresh the panel mask so it shows that word as revealed too. AND while
+  // the first-sentence tier is still buyable, guessing one of its (non-title) words lowers that
+  // tier's live per-word cost, so re-render to keep the displayed price dynamic (-3 per word).
+  if (document.getElementById("hintbox").style.display === "block") {
+    const fsAffected = !firstSentenceUsed && firstSentenceSlice().some(t => t.key === key && t.word !== undefined && !isTitleWord(t.key));
+    if ((lettersRevealed > 0 && titleKeySet.has(key)) || fsAffected) renderHints();
+  }
+  flashKey(key); refreshMeta(); checkWin();
   // a correct typed guess moves the locate highlight onto that word (same as
   // clicking it in the history) instead of leaving it on the last word clicked.
   // Skip on the winning guess — checkWin reveals everything and shows the banner.
@@ -1084,26 +1141,127 @@ function updateRevealBtn() {
 
 /* ---- the layered "Hints" panel ----------------------------------------------
    One button ("Hints") opens a panel of progressively-revealing tiers, least →
-   most revealing: Category → Summary → First letter → Source. Category & Summary
-   come from the AI packet (Groq, cached once per daily); First letter is derived
-   locally from the title; Source is the wiki name. Each revealed tier is tracked
-   for the share text / play-log (summaryUsed = any AI/letter tier; fandomUsed =
-   source) and persisted so a reload restores the panel. */
+   most revealing: Category → Summary → First sentence → Letters → Synonym → Source.
+   Category / Summary / Synonym come from the AI packet (Groq, cached once per daily);
+   First sentence (lead sentence, title words kept blacked) and Letters (escalating
+   title-letter reveal) are derived locally from the article + title; Source is the
+   wiki name. Each revealed tier is tracked for the share text / play-log (summaryUsed
+   = any AI/derived tier; fandomUsed = source) and persisted so a reload restores it. */
 const HINT_TIERS = [
-  { key: "category",     label: "Category" },
-  { key: "summary",      label: "Summary" },
-  { key: "first_letter", label: "First letter" },
-  { key: "synonym",      label: "Synonym" },
-  { key: "source",       label: "Source" },
+  { key: "category",       label: "Category" },
+  { key: "summary",        label: "Summary" },
+  { key: "first_sentence", label: "First sentence" },
+  { key: "first_letter",   label: "Letters" },
+  { key: "synonym",        label: "Synonym" },
+  { key: "source",         label: "Source" },
 ];
 
-// the title's first letter — derived locally, so it's instant and always available
-// (no round-trip), even for a daily whose AI hint was never generated.
-function firstLetterHint() {
-  // match a Unicode letter/number (not just ASCII) so an accented/non-Latin title
-  // ("Élan", "東京") reports its real first character — mirrors firstLetterOf in the hint fn
-  const m = String((META && META.title) || "").match(/[\p{L}\p{N}]/u);
-  return m ? m[0].toUpperCase() : "?";
+// revealable letters/numbers in one word (apostrophes/hyphens are structural, not letters).
+function revealableCount(word) {
+  return (String(word).match(/[\p{L}\p{N}]/gu) || []).length;
+}
+// The Letters tier reveals letters PINNED per word (each title word token carries its own
+// locked `lit` count). A bought letter never re-flows: if you then guess the word it sits in,
+// the word reveals fully but those letters do NOT jump to the next word — you'd pay again for
+// that one. The next word to receive a letter is the first STILL-HIDDEN word (reading order)
+// that isn't already fully lit; stop/guessed words are skipped.
+function nextLitTarget() {
+  return (titleToks || []).find(t =>
+    t.word !== undefined && !t.revealed && (t.lit || 0) < revealableCount(t.word)) || null;
+}
+// snapshot/restore the per-word locked reveals (for persistence + co-op sync). Index-aligned
+// to the title word tokens in order. mergeMax keeps the higher count (buys only ever go up,
+// so a duplicate/out-of-order co-op event can't regress the board).
+function letterLitsSnapshot() {
+  return (titleToks || []).filter(t => t.word !== undefined).map(t => t.lit || 0);
+}
+function applyLetterLits(arr, mergeMax) {
+  if (!Array.isArray(arr)) return;
+  let i = 0;
+  (titleToks || []).forEach(t => {
+    if (t.word === undefined) return;
+    const v = arr[i++] || 0;
+    t.lit = mergeMax ? Math.max(t.lit || 0, v) : v;
+  });
+}
+// back-compat: a save/sync from before per-word lit tracking only has the purchase COUNT.
+// Reconstruct an approximate pinned state by filling hidden words left-to-right.
+function distributeLettersFallback(count) {
+  let remaining = count || 0;
+  (titleToks || []).forEach(t => {
+    if (t.word === undefined || t.revealed) return;
+    const cap = revealableCount(t.word);
+    t.lit = Math.max(0, Math.min(remaining, cap));
+    remaining -= t.lit;
+  });
+}
+
+// the title as a hangman-style mask for the panel: guessed/stop words shown in full, then
+// each word's own pinned lit letters, the rest as "_" — mirrors the actual title at the top.
+function lettersHint() {
+  let out = "";
+  (titleToks || []).forEach(t => {
+    if (t.sep !== undefined) { out += t.sep; return; }
+    if (t.revealed) { out += t.word; return; }   // a guessed or stop word — already visible
+    let seen = 0;
+    for (const ch of t.word) {
+      if (/[\p{L}\p{N}]/u.test(ch)) { out += (seen < (t.lit || 0)) ? ch : "_"; seen++; }
+      else out += ch;
+    }
+  });
+  return out;
+}
+
+/* ---- the "First sentence" hint tier ----------------------------------------
+   Reveals the article's lead sentence in place (its non-title words un-redact),
+   but keeps TITLE words blacked so it's a strong clue, never a giveaway. The cost
+   scales with how many still-hidden words it uncovers (locked at purchase). All
+   local — the article body is already in the client (like the Letters tier). */
+// the first body paragraph (prefer a real <p> with some substance; fall back to block 0)
+function firstParagraphBlock() {
+  if (!bodyBlocks || !bodyBlocks.length) return null;
+  return bodyBlocks.find(b => b.tag === "p" && b.toks.filter(t => t.word !== undefined).length >= 5)
+    || bodyBlocks[0];
+}
+// the token slice (words + separators) making up that paragraph's first sentence. Stops at
+// the first ".", "!" or "?" that's followed by space/end AND preceded by a word of length
+// ≥3 (so abbreviations like "J. K." don't cut it short).
+function firstSentenceSlice() {
+  const blk = firstParagraphBlock();
+  if (!blk) return [];
+  const out = [];
+  for (const t of blk.toks) {
+    out.push(t);
+    if (t.sep !== undefined && /[.!?]/.test(t.sep) && /[.!?]["'’)\]]?(\s|$)/.test(t.sep)) {
+      const prev = [...out].reverse().find(x => x.word !== undefined);
+      if (prev && (prev.word.match(/[\p{L}\p{N}]/gu) || []).length >= 3) break;
+    }
+  }
+  return out;
+}
+// still-hidden, non-title words in the first sentence — what a purchase would uncover (and cost for)
+function firstSentenceHiddenCount() {
+  return firstSentenceSlice().filter(t => t.word !== undefined && !t.revealed && !isTitleWord(t.key)).length;
+}
+// reveal+paint the first sentence's non-title words in place; returns how many were newly
+// uncovered. Idempotent (re-run on restore/sync just repaints). Title words stay hidden.
+function paintFirstSentenceTokens() {
+  let count = 0;
+  firstSentenceSlice().forEach(t => {
+    if (t.word === undefined || isTitleWord(t.key)) return;
+    if (!t.revealed) { t.revealed = true; count++; }
+    if (t.el) showSpan(t);
+  });
+  return count;
+}
+// the first sentence as text for the Hints panel: revealed words shown, unguessed title
+// words masked ("____") so the panel mirrors the in-article reveal even on mobile (modal).
+function firstSentenceText() {
+  return firstSentenceSlice().map(t => {
+    if (t.word === undefined) return t.sep;
+    if (isTitleWord(t.key) && !t.revealed) return "_".repeat([...t.word].length);
+    return t.word;
+  }).join("");
 }
 
 // the Edge Function returns the layered packet as a JSON string in `summary`; legacy
@@ -1124,19 +1282,44 @@ function parseHintPacket(raw) {
 function tierContent(key) {
   if (key === "category") return hints.category || "(no category hint for this puzzle)";
   if (key === "summary") return hints.summary || "(no summary for this puzzle)";
-  if (key === "first_letter") return "The title starts with “" + firstLetterHint() + "”.";
-  if (key === "synonym") return hints.synonym ? "Another word for it: “" + hints.synonym + "”." : "(no synonym for this puzzle)";
+  if (key === "first_sentence") return firstSentenceText();
+  if (key === "first_letter") return "Title: " + lettersHint();
+  if (key === "synonym") return hints.synonym ? "In other words: “" + hints.synonym + "”." : "(no synonym for this puzzle)";
   if (key === "source") return "Source: " + labelForHost((META.source || {}).wiki || "an unknown wiki");
   return "";
 }
 
 // (re)build the hints panel from the current `hints` data + which tiers are revealed.
 // Idempotent — used on open, on each reveal, on restore and when the game locks.
+// the next purchase cost for a tier's Reveal button (shown on the button so the golf
+// tradeoff is visible). The two dynamic tiers price off their own state.
+function nextRevealCost(key) {
+  if (key === "first_letter") return SCORE.letterBase + lettersRevealed * SCORE.letterStep;
+  if (key === "first_sentence") return SCORE.firstSentenceBase + firstSentenceHiddenCount() * SCORE.firstSentencePer;
+  if (key === "source") return SCORE.source;
+  return SCORE[key] || 0;
+}
+function revealButton(key, label) {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "hint-reveal";
+  b.textContent = (label || "Reveal") + " (+" + nextRevealCost(key) + ")";
+  b.disabled = !!(solved || gaveUp);
+  b.addEventListener("click", () => revealTier(key));
+  return b;
+}
+function tierValueSpan(key) {
+  const v = document.createElement("span");
+  v.className = "hint-tier-val";
+  v.textContent = tierContent(key);
+  return v;
+}
+
 function renderHints() {
   const box = document.getElementById("hintbox");
   box.textContent = "";
   box.style.display = "block";
   updateScore();   // a tier may have just been revealed — keep the live score in sync
+  const over = !!(solved || gaveUp);
   HINT_TIERS.forEach(t => {
     const row = document.createElement("div");
     row.className = "hint-tier";
@@ -1145,25 +1328,35 @@ function renderHints() {
     lab.className = "hint-tier-label";
     lab.textContent = t.label;
     row.appendChild(lab);
+
+    // Letters: repeatable — show the title mask once any letter is bought, AND a priced
+    // "next letter" button until every letter is revealed.
+    if (t.key === "first_letter") {
+      if (lettersRevealed > 0) row.appendChild(tierValueSpan("first_letter"));
+      if (!over && nextLitTarget())
+        row.appendChild(revealButton("first_letter", lettersRevealed === 0 ? "Reveal a letter" : "Next letter"));
+      box.appendChild(row);
+      return;
+    }
+    // First sentence: one-shot — show the sentence once bought, else a priced button (only
+    // while there's something still hidden to uncover).
+    if (t.key === "first_sentence") {
+      if (firstSentenceUsed) row.appendChild(tierValueSpan("first_sentence"));
+      else if (!over && firstSentenceHiddenCount() > 0) row.appendChild(revealButton("first_sentence"));
+      box.appendChild(row);
+      return;
+    }
+
     const shown = (t.key === "source") ? fandomUsed : hintTiers.includes(t.key);
     if (shown) {
-      const v = document.createElement("span");
-      v.className = "hint-tier-val";
-      v.textContent = tierContent(t.key);
-      row.appendChild(v);
+      row.appendChild(tierValueSpan(t.key));
     } else if (hintLoading === t.key) {
       const n = document.createElement("span");
       n.className = "hint-note";
       n.textContent = "Generating hint…";
       row.appendChild(n);
     } else {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.className = "hint-reveal";
-      b.textContent = "Reveal";
-      b.disabled = !!(solved || gaveUp);
-      b.addEventListener("click", () => revealTier(t.key));
-      row.appendChild(b);
+      row.appendChild(revealButton(t.key));
     }
     box.appendChild(row);
   });
@@ -1184,17 +1377,42 @@ function addTier(key) {
 
 // reveal the source wiki (also used directly when the fandom isn't secret —
 // random-from-fandom games and known feed dailies)
-function revealSource() {
+// free=true marks this as a pre-known source (player chose the fandom) so it doesn't score —
+// see sourceFree / sourceCharged(). A manual panel reveal calls revealSource() (free undefined).
+function revealSource(free) {
+  if (free) sourceFree = true;
   if (!fandomUsed) { fandomUsed = true; saveDailyState(); }
   renderHints();
   if (mp.active && mp.mode === "coop") mp.broadcastHint("source");   // co-op: share the source tier
   if (mp.active) mp.publishProgress();                               // versus: push the +source score to the standings now
 }
 
+// reveal the next title letter (escalating cost). Repeatable until the title is fully spelled.
+// The letter is PINNED to its word: it lights the first still-hidden word that isn't fully
+// lit. lettersRevealed (the purchase count) only ever goes up — so the price keeps escalating
+// even after you guess a word the bought letters sat in (they don't re-flow / refund).
+function revealNextLetter() {
+  if (solved || gaveUp) return;
+  const target = nextLitTarget();
+  if (!target) return;       // nothing left to reveal among the still-hidden words
+  target.lit = (target.lit || 0) + 1;
+  lettersRevealed++;
+  drawTitle();               // un-redact the next letter in the actual title at the top
+  addTier("first_letter");   // marks the tier, bumps summaryUsed, saves, repaints, broadcasts (co-op), publishes (versus)
+}
+// buy the first-sentence reveal (one-shot): uncover its non-title words and lock the per-word cost.
+function revealFirstSentenceHint() {
+  if (solved || gaveUp || firstSentenceUsed) return;
+  firstSentenceWords = paintFirstSentenceTokens();
+  firstSentenceUsed = true;
+  addTier("first_sentence");
+}
+
 async function revealTier(key) {
   if (solved || gaveUp) return;
   if (key === "source") { revealSource(); return; }
-  if (key === "first_letter") { addTier(key); return; }
+  if (key === "first_letter") { revealNextLetter(); return; }
+  if (key === "first_sentence") { revealFirstSentenceHint(); return; }
   // category / summary / synonym: need the AI packet. Already have it → reveal immediately.
   if (hints && hints[key]) { addTier(key); return; }
   // a packet fetch is already in flight (the other AI tier) — wait for it rather than
@@ -1225,7 +1443,8 @@ function initGame(title, blocks, meta) {
   META = { ...meta, title };
   hints = parseHintPacket(meta.summary) || { ...EMPTY_HINTS };
   hintTiers = []; hintLoading = null;
-  guesses = []; guessed = new Set(); tokens = []; hintsLeft = 3; revealArmed = false; solved = false; summaryUsed = false; fandomUsed = false; gaveUp = false; serverFinished = false; mpCoopPlay = false;
+  guesses = []; guessed = new Set(); tokens = []; hintsLeft = 3; revealArmed = false; solved = false; summaryUsed = false; fandomUsed = false; sourceFree = false; gaveUp = false; serverFinished = false; mpCoopPlay = false;
+  lettersRevealed = 0; firstSentenceUsed = false; firstSentenceWords = 0;   // reset the two derived-from-article hint tiers (a daily resume restores them)
   gameStartedAt = Date.now(); gameFinishedAt = 0;   // reset the clock; a daily resume overrides these with the saved start/finish (restoreDailyState)
   playActiveMs = 0; playTickAt = 0;                 // reset the time-score accumulator (a daily resume restores the saved value)
   wordNav = new Map(); currentNavKey = null;   // reset history-navigation cursors for the new article
@@ -1387,7 +1606,6 @@ async function loadArticle(apiBase, wikiLabel, parseParams, opts = {}) {
     // dailies key the play-log row to the puzzle, so a same-day resume updates the
     // same row instead of logging a new play each reload
     currentPlayId = dailyPuzzleId;
-    rememberLastDaily(wikiLabel);
     // the hint is generated lazily (once, then cached on the puzzle row) the first
     // time a player reveals it — the Hints button is already enabled in initGame.
   } else {
@@ -1397,16 +1615,22 @@ async function loadArticle(apiBase, wikiLabel, parseParams, opts = {}) {
     // or 'custom' for a typed/shared wiki link.
     currentShare = { kind: "custom", wiki: wikiLabel, rev: revid, gameType: opts.gameType || "custom" };
     dailyPuzzleId = null;
-    currentPlayId = mintPlayId();   // random/custom: a fresh per-play row (no puzzle identity to dedupe on)
+    currentPlayId = mintPlayId();   // random/custom: a fresh per-play row (restoreSoloState overrides it on a resume)
     // random/custom games aren't cached: fetch a hint in the background via the
     // Edge Function (keeps the Groq key server-side) and enable the button when it lands
     fetchAndApplyHint(realTitle, blocks);
   }
+  // stamp this as the last-opened game so a same-day reload resumes THIS article
+  // (daily or solo), not the homepage daily — see lastGame() / boot.
+  rememberLastGame();
   setStatus(opts.statusMsg || "Article loaded — title hidden. Start guessing!");
+  // resume a reloaded solo (random/custom) game's progress in place — dailies restore
+  // later in loadPuzzlePointer. No-op unless the saved solo game IS this exact article.
+  if (currentShare.kind === "custom") await restoreSoloState();
   // when the player explicitly chose this fandom (Random from a fandom), it's no
   // longer a secret — reveal the source tier. The daily path reveals *after*
   // restoreDailyState (in loadPuzzlePointer), so it can't clobber progress.
-  if (opts.revealFandom && !opts.daily) revealSource();
+  if (opts.revealFandom && !opts.daily) revealSource(true);   // free: player chose this fandom
   // multiplayer: a New-game flow picked a mode → open the room now that the article loaded
   if (!opts.daily && pendingMpMode) { const m = pendingMpMode; pendingMpMode = null; mp.createRoom(m); }
 }
@@ -1488,9 +1712,11 @@ async function loadFromRevision(wiki, rev) {
   try {
     const apiBase = await resolveApiBase("https://" + wiki);   // handles /api.php vs /w/api.php
     await loadArticle(apiBase, wiki, { oldid: rev });
+    return true;
   } catch (e) {
     status.className = "status err";
     setStatus("Couldn't open the shared puzzle: " + e.message + " — try the Daily button.");
+    return false;
   }
 }
 
@@ -1796,18 +2022,35 @@ function setHomeDailyPref(v) {
   catch { /* storage blocked — the setting just won't persist */ }
 }
 
-// the last daily the player opened, stamped with the local day it was opened on. A
-// plain reload resumes it — but only while it's still that same day; once the dailies
-// roll over at local (Europe/Amsterdam) midnight, boot drops back to the chosen
-// homepage daily (homeDailyPref) instead of resuming yesterday's selection.
-const LAST_DAILY_KEY = "redigeerdle:lastdaily";
-function lastDaily() {
-  try { const v = JSON.parse(localStorage.getItem(LAST_DAILY_KEY)); return v && v.wiki ? v : null; }
-  catch { return null; }
+// The last game the player opened — of ANY kind: a daily OR a solo random/custom
+// game — stamped with the local day it was opened on. A plain reload resumes THIS
+// exact game (the same article, with its progress); we only fall back to the homepage
+// daily once it's a new local day (the dailies have rolled over at Amsterdam midnight).
+// So: reload mid-game → right back where you were; first visit of a new day → the daily.
+const LAST_GAME_KEY = "redigeerdle:lastgame";
+const LAST_DAILY_KEY = "redigeerdle:lastdaily";   // legacy daily-only key — still read for back-compat
+function lastGame() {
+  try {
+    const v = JSON.parse(localStorage.getItem(LAST_GAME_KEY));
+    if (v && v.day && (v.kind === "custom" ? (v.wiki && v.rev) : v.wiki)) return v;
+  } catch { /* ignore */ }
+  // back-compat: players who last opened a daily before this key existed
+  try {
+    const d = JSON.parse(localStorage.getItem(LAST_DAILY_KEY));
+    if (d && d.wiki) return { kind: "daily", wiki: d.wiki, day: d.day };
+  } catch { /* ignore */ }
+  return null;
 }
-function rememberLastDaily(wiki) {
-  try { localStorage.setItem(LAST_DAILY_KEY, JSON.stringify({ wiki, day: todayLocal() })); }
-  catch { /* storage blocked — no resume */ }
+// Stamp the currently-loaded game so boot can resume it. Dailies store {kind,wiki,day};
+// solo games also store the pinned {rev} so loadFromRevision can reproduce the article.
+function rememberLastGame() {
+  try {
+    const g = currentShare.kind === "daily"
+      ? { kind: "daily", wiki: currentShare.wiki, day: todayLocal() }
+      : { kind: "custom", wiki: currentShare.wiki, rev: currentShare.rev, day: todayLocal() };
+    if (!g.wiki) return;
+    localStorage.setItem(LAST_GAME_KEY, JSON.stringify(g));
+  } catch { /* storage blocked — no resume */ }
 }
 
 function buildShareUrl() {
@@ -1823,25 +2066,39 @@ function buildShareUrl() {
 }
 
 // share icon for each hint tier (same least→most order as HINT_TIERS / the panel)
-const SHARE_ICON = { category: "📂", summary: "📄", first_letter: "🔤", synonym: "🔁", source: "🏷️" };
+const SHARE_ICON = { category: "📂", summary: "📄", first_sentence: "📖", first_letter: "🔤", synonym: "🔁", source: "🏷️" };
 
 /* ---- score: lower is better -------------------------------------------------
    A correct typed guess is free (+0); every bit of help — and time — adds points.
    Penalties: +1 for every full 10s of active play (per10s, see accruePlayTime),
    wrong guess +1, free word reveal +5, the source/summary/category hint tiers +10
-   each, the first-letter tier +20, the synonym tier +30 (most revealing). Derived
+   each, the first-letter tier +20, the synonym tier +50 (most revealing). Derived
    purely from the same play state the
    share line uses (guesses / hintTiers / fandomUsed / playActiveMs), so the live
    pill, the share text and the win banner can never disagree. The time component
    freezes at the finish and pauses while the tab is hidden. */
-const SCORE = { wrongGuess: 1, reveal: 5, category: 10, summary: 10, first_letter: 20, synonym: 30, source: 10, per10s: 1 };
+const SCORE = { wrongGuess: 1, reveal: 5, category: 10, summary: 10, synonym: 50, source: 10, per10s: 1,
+  letterBase: 20, letterStep: 5,            // Letters tier: letter n costs letterBase + (n-1)*letterStep (20, 25, 30, …)
+  firstSentenceBase: 0, firstSentencePer: 3 // First sentence: +3 per still-hidden word it uncovers (no base), locked at purchase
+};
+// total cost of the first k revealed title letters: sum of (letterBase + (n-1)*letterStep)
+function letterCost(k) { k = k || 0; return k * SCORE.letterBase + SCORE.letterStep * (k * (k - 1) / 2); }
+// did the Source tier count as a PAID hint? It's shown (fandomUsed) but free — not scored,
+// not in the share breakdown, not logged as source_used — when the player chose this fandom
+// (sourceFree). Used everywhere the source is treated as "a hint the player spent".
+function sourceCharged() { return fandomUsed && !sourceFree; }
 function computeScore() {
   if (!guesses) return 0;
   const bad = guesses.filter(g => !g.hint && g.hits === 0).length;   // wrong typed guesses
   const reveals = guesses.filter(g => g.hint).length;                // paid free-word reveals
   let s = bad * SCORE.wrongGuess + reveals * SCORE.reveal;
-  (hintTiers || []).forEach(k => { s += SCORE[k] || 0; });           // category / summary / first_letter / synonym
-  if (fandomUsed) s += SCORE.source;                                 // source tier
+  (hintTiers || []).forEach(k => {                                   // category / summary / synonym
+    if (k === "first_letter" || k === "first_sentence") return;      // these two cost from their own counters below
+    s += SCORE[k] || 0;
+  });
+  if (sourceCharged()) s += SCORE.source;                            // source tier — but free when the player chose this fandom
+  s += letterCost(lettersRevealed);                                  // escalating per-letter cost
+  if (firstSentenceUsed) s += SCORE.firstSentenceBase + (firstSentenceWords || 0) * SCORE.firstSentencePer;
   s += Math.floor(playActiveMs / 10000) * SCORE.per10s;              // +1 for every full 10s of active play (frozen at finish)
   return s;
 }
@@ -1899,15 +2156,17 @@ function buildShareText() {
             ? "Redigeerdle — a redacted article. Can you find the title?"
             : "Redigeerdle — " + plural(guesses.length, "guess", "guesses") + " in, still hunting the title.");
   // before any play and with no help used, just the teaser
-  if (!gaveUp && guesses.length === 0 && !summaryUsed && !fandomUsed) return head;
+  if (!gaveUp && guesses.length === 0 && !summaryUsed && !sourceCharged()) return head;
   const lines = [head];
   const bar = accuracyBar(good, bad);
   if (bar) lines.push(bar);
   lines.push("✅ " + good + " good  ❌ " + bad + " bad  💡 " + plural(reveals, "reveal", "reveals"));
   // break the help down per tier so the share shows exactly which hints were used
   const helps = HINT_TIERS
-    .filter(t => t.key === "source" ? fandomUsed : hintTiers.includes(t.key))
-    .map(t => SHARE_ICON[t.key] + " " + t.label.toLowerCase());
+    .filter(t => t.key === "source" ? sourceCharged() : hintTiers.includes(t.key))
+    .map(t => t.key === "first_letter"
+      ? SHARE_ICON.first_letter + " " + lettersRevealed + (lettersRevealed === 1 ? " letter" : " letters")
+      : SHARE_ICON[t.key] + " " + t.label.toLowerCase());
   if (helps.length) lines.push(helps.join("  "));
   lines.push("🎯 Score " + computeScore() + " (lower is better)");
   return lines.join("\n");
@@ -2234,7 +2493,7 @@ async function loadPuzzlePointer(p, { revealFandom = false } = {}) {
       featured: p.is_featured !== false,
       statusMsg });
   await restoreDailyState();
-  if (revealFandom) revealSource();   // reveal after restore so saveDailyState can't clobber progress
+  if (revealFandom) revealSource(true);   // free (chosen fandom); reveal after restore so saveDailyState can't clobber progress
 }
 
 /* ---- persist daily progress in localStorage so a refresh resumes it ----
@@ -2243,16 +2502,35 @@ async function loadPuzzlePointer(p, { revealFandom = false } = {}) {
    solved, so the leaderboard stays honest. */
 let restoring = false;
 const stateKey = id => "redigeerdle:daily:" + id;
+// solo (random/custom) games persist progress in ONE slot (there's only ever one
+// "current" solo game) — bounded storage, and it naturally resumes only the most
+// recent one. The stored `id` (wiki@revision) guards against restoring a DIFFERENT
+// article into the slot.
+const SOLO_STATE_KEY = "redigeerdle:sologame";
+const soloId = () => currentShare.wiki + "@" + currentShare.rev;
+// localStorage key for the CURRENT game's progress: a daily keys by puzzle id (one per
+// day/fandom), a solo game uses the single shared slot.
+function currentSaveKey() {
+  if (currentShare.kind === "daily") return dailyPuzzleId ? stateKey(dailyPuzzleId) : null;
+  if (currentShare.kind === "custom" && currentShare.wiki && currentShare.rev) return SOLO_STATE_KEY;
+  return null;
+}
 
 function saveDailyState() {
   recordPlay();   // mirror every state change to the private play-log (all game types, signed-in only)
-  if (restoring || currentShare.kind !== "daily" || !dailyPuzzleId) return;
+  if (restoring) return;
+  const key = currentSaveKey();   // daily → per-puzzle key; solo → the single SOLO_STATE_KEY slot
+  if (!key) return;
   try {
-    localStorage.setItem(stateKey(dailyPuzzleId), JSON.stringify({
-      v: 1, id: dailyPuzzleId,
+    localStorage.setItem(key, JSON.stringify({
+      v: 1, id: currentShare.kind === "daily" ? dailyPuzzleId : soloId(),
+      playId: currentPlayId, gameType: currentShare.gameType,   // solo resume keeps the same play-log row + game_type
       guesses: guesses.map(g => ({ word: g.word, hits: g.hits, hint: !!g.hint })),
-      hintsLeft, solved: !!solved, summaryUsed: !!summaryUsed, fandomUsed: !!fandomUsed,
+      hintsLeft, solved: !!solved, summaryUsed: !!summaryUsed, fandomUsed: !!fandomUsed, sourceFree: !!sourceFree,
       hintTiers: (hintTiers || []).slice(),   // which AI/letter tiers were revealed (restore the panel)
+      lettersRevealed: lettersRevealed || 0,  // how many title letters the Letters tier was bought (drives cost)
+      letterLits: letterLitsSnapshot(),       // the PINNED per-word reveals (so they don't re-flow on resume)
+      firstSentenceUsed: !!firstSentenceUsed, firstSentenceWords: firstSentenceWords || 0,   // first-sentence tier + its locked per-word cost
       gaveUp: !!gaveUp,
       coop: !!mpCoopPlay,   // a daily done co-op stays flagged across a same-day reload (the room itself is ephemeral)
       startedAt: gameStartedAt || null,   // keep the original start so a same-day resume reports honest duration
@@ -2282,19 +2560,10 @@ function showFinishedDaily(didSolve) {
   attribution(true);
 }
 
-async function restoreDailyState() {
-  if (currentShare.kind !== "daily" || !dailyPuzzleId) return;
-  let saved;
-  try { saved = JSON.parse(localStorage.getItem(stateKey(dailyPuzzleId))); } catch { saved = null; }
-  // A minimal "finished" marker (written by restoreFinishedFromServer): locked
-  // outcome, empty guess list — re-lock directly without a server round-trip.
-  if (saved && saved.id === dailyPuzzleId && Array.isArray(saved.guesses)
-      && !saved.guesses.length && (saved.solved || saved.gaveUp)) {
-    showFinishedDaily(!!saved.solved); updateRevealBtn(); return;
-  }
-  const hasGuessData = saved && saved.id === dailyPuzzleId && Array.isArray(saved.guesses)
-    && (saved.guesses.length || saved.summaryUsed || saved.fandomUsed || saved.gaveUp);
-  if (!hasGuessData) { await restoreFinishedFromServer(); return; }
+// Replay a saved progress snapshot (guesses, hints, clock) onto the freshly-loaded
+// article. Shared by the daily resume and the solo (random/custom) resume — the daily-
+// specific server/replay-block logic stays in restoreDailyState.
+function replaySavedState(saved) {
   restoring = true;                       // replay without re-saving each step
   // apply every saved guess to the model first, then render ONCE (not per guess)
   saved.guesses.forEach(g => { const k = norm(g.word); if (k && !guessed.has(k)) recordGuess(k, g.word, !!g.hint); });
@@ -2311,13 +2580,60 @@ async function restoreDailyState() {
     ? saved.hintTiers.filter(k => k !== "source")
     : (saved.summaryUsed ? ["summary"] : []);
   if (saved.fandomUsed) fandomUsed = true;
+  if (saved.sourceFree) sourceFree = true;   // keep a chosen-fandom source free across reloads (so it stays unscored)
   summaryUsed = hintTiers.length > 0;
+  // restore the two article-derived tiers (back-compat: a pre-counter save only knew
+  // "first letter shown" via hintTiers → treat that as one letter).
+  lettersRevealed = (typeof saved.lettersRevealed === "number")
+    ? saved.lettersRevealed
+    : (hintTiers.includes("first_letter") ? 1 : 0);
+  // restore the PINNED per-word reveals. A pre-letterLits save only has the count → fall
+  // back to filling hidden words left-to-right (approximates the old behaviour).
+  if (Array.isArray(saved.letterLits)) applyLetterLits(saved.letterLits, false);
+  else distributeLettersFallback(lettersRevealed);
+  if (lettersRevealed > 0 && !solved && !gaveUp) drawTitle();   // bring the lit title letters back (draw() ran before lettersRevealed was set)
+  if (saved.firstSentenceUsed) {
+    firstSentenceWords = (typeof saved.firstSentenceWords === "number") ? saved.firstSentenceWords : 0;
+    firstSentenceUsed = true;
+    paintFirstSentenceTokens();   // re-reveal the lead sentence in the body (cost stays the saved value)
+  }
   if (hintTiers.length || fandomUsed) renderHints();
   restoring = false;
   if (saved.gaveUp && !solved) giveUp();  // restore a given-up game as ended
   updateRevealBtn();
   if (!solved && !gaveUp) setStatus("Resumed your progress — " + guesses.length + " guess(es) so far.");
   recordPlay();   // sync the resumed snapshot to the play-log (no-op when logged out / nothing to record)
+}
+
+async function restoreDailyState() {
+  if (currentShare.kind !== "daily" || !dailyPuzzleId) return;
+  let saved;
+  try { saved = JSON.parse(localStorage.getItem(stateKey(dailyPuzzleId))); } catch { saved = null; }
+  // A minimal "finished" marker (written by restoreFinishedFromServer): locked
+  // outcome, empty guess list — re-lock directly without a server round-trip.
+  if (saved && saved.id === dailyPuzzleId && Array.isArray(saved.guesses)
+      && !saved.guesses.length && (saved.solved || saved.gaveUp)) {
+    showFinishedDaily(!!saved.solved); updateRevealBtn(); return;
+  }
+  const hasGuessData = saved && saved.id === dailyPuzzleId && Array.isArray(saved.guesses)
+    && (saved.guesses.length || saved.summaryUsed || saved.fandomUsed || saved.gaveUp);
+  if (!hasGuessData) { await restoreFinishedFromServer(); return; }
+  replaySavedState(saved);
+}
+
+// Resume a reloaded solo (random/custom) game's progress in place. Reads the single
+// SOLO_STATE_KEY slot and only replays when it holds THIS exact article (wiki@revision)
+// — a fresh game with a different revision falls through untouched. No server path:
+// solo games aren't on the leaderboard, so there's nothing to re-lock from the server.
+async function restoreSoloState() {
+  if (currentShare.kind !== "custom" || !currentShare.wiki || !currentShare.rev) return;
+  let saved;
+  try { saved = JSON.parse(localStorage.getItem(SOLO_STATE_KEY)); } catch { saved = null; }
+  if (!saved || saved.id !== soloId() || !Array.isArray(saved.guesses)) return;
+  if (!(saved.guesses.length || saved.summaryUsed || saved.fandomUsed || saved.gaveUp)) return;
+  if (saved.playId) currentPlayId = saved.playId;            // keep the same play-log row across the reload
+  if (saved.gameType) currentShare.gameType = saved.gameType;   // and the original game_type (full_random / custom / …)
+  replaySavedState(saved);
 }
 
 // No usable local state for this daily, but a *real* signed-in user may have
@@ -2594,8 +2910,10 @@ async function recordPlay() {
   // would overwrite the authoritative server row with a 0-guess snapshot — skip.
   if (serverFinished) return;
   // nothing meaningful has happened yet (article just loaded, no interaction) → skip,
-  // so merely opening a puzzle doesn't create a row.
-  if (!guesses.length && !solved && !gaveUp && !summaryUsed && !fandomUsed) return;
+  // so merely opening a puzzle doesn't create a row. A pre-known (chosen-fandom) source
+  // isn't interaction, so it uses sourceCharged() — opening a fandom daily and doing
+  // nothing logs no row, same as opening a featured daily.
+  if (!guesses.length && !solved && !gaveUp && !summaryUsed && !sourceCharged()) return;
   const isDaily = currentShare.kind === "daily";
   const reveals = guesses.filter(g => g.hint).length;             // paid free-word reveals
   const good    = guesses.filter(g => !g.hint && g.hits > 0).length;  // typed, revealed >=1 word
@@ -2617,7 +2935,7 @@ async function recordPlay() {
     good_guesses: good, wrong_guesses: wrong, reveals,
     score: computeScore(),   // golf-style total (lower is better); see SCORE / computeScore
     revealed_pct: revealedPct,
-    summary_used: !!summaryUsed, source_used: !!fandomUsed,
+    summary_used: !!summaryUsed, source_used: sourceCharged(),   // a pre-known (chosen-fandom) source isn't a used hint → doesn't break a "clean solve"
     coop: !!mpCoopPlay,   // played co-op (shared board). For a co-op daily this is the only marker — game_type stays the daily's.
     gave_up: !!gaveUp, solved: !!solved,
     started_at: gameStartedAt ? new Date(gameStartedAt).toISOString() : null,
@@ -3382,7 +3700,13 @@ const mp = {
   send(event, payload) { this._sent.push({ event, payload }); if (this._transport) this._transport.send(event, payload); },
   broadcastGuess(key, raw, hint) { this.send("guess", { key, raw, hint: !!hint, by: mpName() }); },
   broadcastReveal(key) { this.send("reveal", { key, by: mpName() }); },
-  broadcastHint(tier) { this.send("hint", { tier, packet: hints, by: mpName() }); },
+  // co-op: share a revealed tier. The AI packet rides along (no extra Groq call); the
+  // Letters tier also carries its purchase count + the PINNED per-word reveal mask, so the
+  // teammate's title lights the exact same letters (and they don't re-flow on either side).
+  broadcastHint(tier) {
+    const extra = (tier === "first_letter") ? { letters: lettersRevealed, litMask: letterLitsSnapshot() } : {};
+    this.send("hint", { tier, packet: hints, by: mpName(), ...extra });
+  },
 
   // ---- incoming ----------------------------------------------------------
   _recv(event, payload) {
@@ -3466,11 +3790,24 @@ const mp = {
     this._incomingBy = null;
     hintsLeft--; updateRevealBtn(); refreshMeta();
   },
-  _applyRemoteHint({ tier, packet }) {
+  _applyRemoteHint({ tier, packet, letters, litMask }) {
     if (!this.active) return;
     if (packet) hints = { ...(hints || EMPTY_HINTS), ...packet };
     if (tier === "source") fandomUsed = true;
-    else if (tier && !hintTiers.includes(tier)) { hintTiers.push(tier); summaryUsed = true; }
+    else if (tier === "first_letter") {
+      lettersRevealed = Math.max(lettersRevealed || 0, letters || 1);   // catch up to the teammate's purchase count
+      // apply the PINNED per-word reveals (merge-max so it can't regress); fall back to the
+      // count-only distribution for an older peer that sent no litMask.
+      if (Array.isArray(litMask)) applyLetterLits(litMask, true);
+      else distributeLettersFallback(lettersRevealed);
+      if (!hintTiers.includes("first_letter")) hintTiers.push("first_letter");
+      summaryUsed = true;
+      if (!solved && !gaveUp) drawTitle();   // show the teammate's revealed letters in the title too
+    } else if (tier === "first_sentence") {
+      if (!firstSentenceUsed) { firstSentenceWords = paintFirstSentenceTokens(); firstSentenceUsed = true; }
+      if (!hintTiers.includes("first_sentence")) hintTiers.push("first_sentence");
+      summaryUsed = true;
+    } else if (tier && !hintTiers.includes(tier)) { hintTiers.push(tier); summaryUsed = true; }
     saveDailyState(); renderHints();
   },
   _applyStart(startAt) {
@@ -3487,7 +3824,8 @@ const mp = {
   _sendSync() {
     this.send("sync", {
       guesses: (guesses || []).map(g => ({ key: norm(g.word), raw: g.word, hint: !!g.hint, by: g.by || null })),
-      hintsLeft, hints, hintTiers: (hintTiers || []).slice(), fandomUsed: !!fandomUsed,
+      hintsLeft, hints, hintTiers: (hintTiers || []).slice(), fandomUsed: !!fandomUsed, sourceFree: !!sourceFree,
+      lettersRevealed: lettersRevealed || 0, letterLits: letterLitsSnapshot(), firstSentenceUsed: !!firstSentenceUsed,
     });
   },
   _applySync(payload) {
@@ -3505,6 +3843,12 @@ const mp = {
     if (payload.hints) hints = payload.hints;
     if (payload.hintTiers) hintTiers = payload.hintTiers.slice();
     if (payload.fandomUsed) fandomUsed = true;
+    if (payload.sourceFree) sourceFree = true;   // inherit the host's free (chosen-fandom) source so the joiner isn't charged for it
+    if (typeof payload.lettersRevealed === "number") lettersRevealed = payload.lettersRevealed;
+    if (Array.isArray(payload.letterLits)) applyLetterLits(payload.letterLits, true);
+    else if (lettersRevealed > 0) distributeLettersFallback(lettersRevealed);
+    if (payload.firstSentenceUsed && !firstSentenceUsed) { firstSentenceWords = paintFirstSentenceTokens(); firstSentenceUsed = true; }
+    if (lettersRevealed > 0 && !solved && !gaveUp) drawTitle();   // lay the synced letters over the title
     updateRevealBtn(); refreshMeta(); renderHints();
   },
 
@@ -3586,10 +3930,11 @@ function pruneOldDailyState() {
 // `?g=` is the opaque custom token (hides the fandom); `?wiki=&rev=` is the old
 // legible format, still honoured so links shared before the change keep working.
 // `?d=` opens a shared feed daily (that fandom's daily for today); `?p=daily` forces
-// the featured "general" home daily. With no params we resume the daily the player
-// last opened *today*; once the dailies roll over (a new local day) we drop back to
-// their chosen homepage daily (Settings → Daily feed → Homepage daily): the featured
-// general daily by default, or a followed fandom if they picked one.
+// the featured "general" home daily. With no params we resume the EXACT game the player
+// last opened *today* — a daily OR a solo random/custom game (same article + progress);
+// once the dailies roll over (a new local day) we drop back to their chosen homepage
+// daily (Settings → Daily feed → Homepage daily): the featured general daily by default,
+// or a followed fandom if they picked one.
 (function boot() {
   loadPrefs();   // dark mode is already applied by the head script; this loads auto-scroll
   pruneOldDailyState();   // tidy up daily-state keys older than ~60 days
@@ -3608,13 +3953,20 @@ function pruneOldDailyState() {
   const dailyWiki = q.get("d") ? decodeDaily(q.get("d")) : null;
   if (dailyWiki) { loadDailyForWiki(dailyWiki).then(ok => { if (!ok) loadPuzzle(); }); return; }
   if (q.get("p")) { loadPuzzle(); return; }   // explicit featured-home share — ignore resume/pref
-  // resume the last-opened daily, but only while it's still the same local day —
-  // once the dailies reset at local midnight, fall through to the homepage daily
-  // (a followed fandom, or the featured general daily).
-  const last = lastDaily();
-  if (last && last.wiki && last.day === todayLocal()) {
-    loadDailyForWiki(last.wiki).then(ok => { if (!ok) openHomeDaily(); });
-    return;
+  // resume the EXACT game the player last had open — a daily OR a solo random/custom
+  // game — but only while it's still the same local day. Once the dailies reset at
+  // local (Amsterdam) midnight, fall through to the homepage daily (a followed fandom,
+  // or the featured general daily) instead of resuming yesterday's game.
+  const last = lastGame();
+  if (last && last.day === todayLocal()) {
+    if (last.kind === "custom" && last.wiki && last.rev) {
+      loadFromRevision(last.wiki, last.rev).then(ok => { if (!ok) openHomeDaily(); });
+      return;
+    }
+    if (last.wiki) {
+      loadDailyForWiki(last.wiki).then(ok => { if (!ok) openHomeDaily(); });
+      return;
+    }
   }
   openHomeDaily();
 })();

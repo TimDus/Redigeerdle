@@ -105,6 +105,29 @@ test("co-op: a hint revealed by a teammate shows for everyone (no extra fetch)",
   await expect(page.locator('#hintbox .hint-tier[data-tier="summary"] .hint-tier-val')).toBeVisible();
 });
 
+test("co-op: a teammate's letter reveals show in the shared title and stay PINNED across a teammate's guess", async ({ page }) => {
+  await fakeTx(page);
+  await routeRest(page);
+  await page.goto("/");
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+  await beReal(page);
+  await loadHP(page);
+  await page.evaluate(() => mp.createRoom("coop"));
+
+  // a teammate reveals two letters (count + pinned per-word mask ride the hint event) → our
+  // REAL title ("Golden Snitch") un-redacts them: "Go" lit on the first hidden word
+  await page.evaluate(() => mp._recv("hint", { tier: "first_letter", letters: 2, litMask: [2, 0], packet: hints, by: "Bob" }));
+  await expect(page.locator("#title .letterlit").first()).toHaveText("Go");
+  expect(await page.evaluate(() => lettersRevealed)).toBe(2);
+
+  // a teammate then GUESSES the first title word on the shared board. The two letters were
+  // pinned to "Golden" → they must NOT jump to "Snitch" and reveal a free letter there.
+  await page.evaluate(() => mp._recv("guess", { key: "golden", raw: "golden", hint: false, by: "Bob" }));
+  await expect(page.locator("#title .red.shown").filter({ hasText: "Golden" }).first()).toBeVisible();
+  await expect(page.locator("#title .letterlit")).toHaveCount(0);   // no free letter on Snitch
+  expect(await page.evaluate(() => lettersRevealed)).toBe(2);
+});
+
 test("co-op: revealing the Synonym tier broadcasts the tier + packet (teammate pays no Groq call)", async ({ page }) => {
   await fakeTx(page);
   await routeRest(page);
@@ -343,7 +366,7 @@ test("versus: revealing a hint broadcasts our updated score (opponents see the +
   expect(prog.some(p => p.payload.score >= 10)).toBe(true);   // the summary tier is reflected in the broadcast score
 });
 
-test("versus: revealing the Synonym tier broadcasts our +30 score", async ({ page }) => {
+test("versus: revealing the Synonym tier broadcasts our +50 score", async ({ page }) => {
   await fakeTx(page);
   await routeRest(page);
   await page.goto("/");
@@ -354,12 +377,12 @@ test("versus: revealing the Synonym tier broadcasts our +30 score", async ({ pag
     await mp._enterRoom({ mode: "versus", wiki, rev, started: true });
   }, [HP_WIKI, HP_REV]);
 
-  // reveal the synonym tier (+30) and confirm a fresh progress broadcast carries it
+  // reveal the synonym tier (+50) and confirm a fresh progress broadcast carries it
   await page.evaluate(() => { hints = { category: "", summary: "", synonym: "Gilded ball", first_letter: "" }; mp._sent.length = 0; });
   await page.click("#hintsBtn");
   await page.click('.hint-tier[data-tier="synonym"] .hint-reveal');
   const prog = await page.evaluate(() => mp._sent.filter(s => s.event === "progress"));
-  expect(prog.some(p => p.payload.score >= 30)).toBe(true);   // synonym is the priciest tier
+  expect(prog.some(p => p.payload.score >= 50)).toBe(true);   // synonym is the priciest tier
 });
 
 test("a finished co-op game is logged to plays with game_type 'coop'", async ({ page }) => {
