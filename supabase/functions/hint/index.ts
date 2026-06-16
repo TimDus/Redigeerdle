@@ -23,9 +23,10 @@
 // Request  (POST):  { "title": "<answer>", "text": "<excerpt>", "puzzleId"?: "<id>" }
 // Response (JSON):  { "summary": "<packet or empty>", "status": "ready" | "pending" }
 //   `summary` carries a JSON STRING of the layered hint packet
-//   {"category","summary","first_letter"} (or "" when no usable hint). It's stored
-//   verbatim in puzzles.summary and parsed by the client (parseHintPacket). Legacy
-//   rows / puzzle.json may hold a plain sentence instead — the client copes with both.
+//   {"category","summary","synonym","first_letter"} (or "" when no usable hint). It's
+//   stored verbatim in puzzles.summary and parsed by the client (parseHintPacket).
+//   Legacy rows / puzzle.json may hold a plain sentence (or a packet without `synonym`,
+//   from before that tier existed) — the client copes with all of these.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -90,22 +91,29 @@ function foldText(s: string): string {
   return String(s).normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase();
 }
 
-// Ask Groq — in ONE call — for the layered hint packet {category, summary, first_letter}.
-// The model writes only `category` + `summary` as JSON; `first_letter` is computed here.
-// Returns a JSON STRING of the packet, or "" on any failure / when no tier is usable.
+// Ask Groq — in ONE call — for the layered hint packet {category, summary, synonym,
+// first_letter}. The model writes `category` + `summary` + `synonym` as JSON;
+// `first_letter` is computed here. Keeping it ONE batched call (not one per tier) is what
+// respects Groq's per-minute request limit — see CLAUDE.md. ~910 tokens/call, well under
+// the free tier's 12K TPM / 30 RPM. Returns a JSON STRING of the packet, or "" on any
+// failure / when no tier is usable.
 // The per-field leak filter is kept in sync with leaksTitle in
 // scripts/lib/leak-filter.mjs (the unit-tested reference).
 async function generate(title: string, text: string): Promise<string> {
   const key = Deno.env.get("GROQ_API_KEY");
   if (!key) return "";
   const sys = "You write layered, spoiler-controlled hints for a word-guessing game where the player "
-    + "must guess an article title. Return ONLY a JSON object with exactly two string keys:\n"
+    + "must guess an article title. Return ONLY a JSON object with exactly three string keys:\n"
     + "  \"category\": 3-6 words naming the general KIND of subject (e.g. 'A fictional character', "
     + "'A historical battle', 'A type of food'). No proper nouns.\n"
     + "  \"summary\": one vague sentence, max 18 words, describing the subject in general terms.\n"
-    + "Rules for BOTH fields: the player must NOT be able to read the answer from them — "
-    + "NEVER write the title or any of its words, names, or close variants; avoid proper nouns; "
-    + "evocative but not identifying. Output ONLY the JSON object, nothing else.";
+    + "  \"synonym\": 1-4 words giving a SYNONYM or near-equivalent of the title's main word(s) — "
+    + "another way to say the same thing — but NEVER the title word itself or an obvious variant of it. "
+    + "If the title is a proper name, give a synonymous term for what it fundamentally is.\n"
+    + "Rules for ALL fields: NEVER write the title or any of its words, names, or close variants; "
+    + "avoid proper nouns. `category` and `summary` must be evocative but NOT identifying; `synonym` "
+    + "MAY be close in meaning (that is its purpose) but must still not contain a title word. "
+    + "Output ONLY the JSON object, nothing else.";
   const user = `Title (the answer — never mention it or its words): "${title}"\n\n`
     + `Article excerpt:\n${String(text).slice(0, 1500)}\n\nReturn the JSON object.`;
   try {
@@ -115,7 +123,7 @@ async function generate(title: string, text: string): Promise<string> {
       body: JSON.stringify({
         model: GROQ_MODEL,
         messages: [{ role: "system", content: sys }, { role: "user", content: user }],
-        max_tokens: 220, temperature: 0.7,
+        max_tokens: 260, temperature: 0.7,   // 3 short fields now (category + summary + synonym); first_letter is computed here
         response_format: { type: "json_object" },
       }),
       // bound a slow/hung Groq so we don't hold the daily's generation claim (and the
@@ -130,16 +138,20 @@ async function generate(title: string, text: string): Promise<string> {
     try { parsed = JSON.parse(content); } catch { return ""; }
     let category = String(parsed.category || "").trim().replace(/^["']+|["']+$/g, "").trim();
     let summary = String(parsed.summary || "").trim().replace(/^["']+|["']+$/g, "").trim();
+    let synonym = String(parsed.synonym || "").trim().replace(/^["']+|["']+$/g, "").trim();
     // per-field leak filter: blank ONLY the field that contains a significant title word
     // (keep the other tiers). Mirrors leaksTitle in scripts/lib/leak-filter.mjs — folds
     // diacritics and matches Unicode letters/numbers, so an accented/non-Latin title
     // (Pokémon, Cyrillic, CJK) is actually guarded instead of silently producing 0 words.
+    // The synonym is MEANT to be close in meaning, but the same filter still bars it from
+    // literally containing a title word/variant (so it stays a synonym, never the answer).
     const titleWords = foldText(title).match(/[\p{L}\p{N}]{3,}/gu) || [];
     const leaks = (s: string) => { const low = foldText(s); return titleWords.some((w: string) => low.includes(w)); };
     if (category.length < 3 || category.length > 80 || leaks(category)) category = "";
     if (summary.length < 8 || summary.length > 200 || leaks(summary)) summary = "";
-    if (!category && !summary) return "";   // nothing usable from the model
-    return JSON.stringify({ category, summary, first_letter: firstLetterOf(title) });
+    if (synonym.length < 2 || synonym.length > 60 || leaks(synonym)) synonym = "";
+    if (!category && !summary && !synonym) return "";   // nothing usable from the model
+    return JSON.stringify({ category, summary, synonym, first_letter: firstLetterOf(title) });
   } catch {
     return "";
   }

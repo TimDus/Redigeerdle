@@ -613,7 +613,7 @@
   <div id="playarea">
     <div class="statusbar" id="statusbar">
       <div class="status" id="status">Loading puzzle…</div>
-      <div class="score" id="scorePill" title="Your score — lower is better. Wrong guess +1, reveal a word +5, summary/category/source +10, first letter +20. Correct guesses are free.">Score: <b id="scoreVal">0</b></div>
+      <div class="score" id="scorePill" title="Your score — lower is better. +1 for every 10 seconds, wrong guess +1, reveal a word +5, summary/category/source +10, first letter +20, synonym +30. Correct guesses are free.">Score: <b id="scoreVal">0</b></div>
       <div class="statusbtns">
         <button id="shareBtn">Share</button>
         <button id="inviteBtn" hidden>Invite (co-op)</button>
@@ -710,7 +710,7 @@ who whom whose what when where why how all any some more most such into over und
 after before between during without within up down out off`.split(/\s+/));
 
 let guesses, guessed, tokens, titleKeyWords, titleKeySet, titleStemSet, titleToks, bodyBlocks, META, hintsLeft, hints, hintTiers, hintLoading, revealArmed, solved, summaryUsed, fandomUsed, gaveUp;
-const EMPTY_HINTS = { category: "", summary: "", first_letter: "" };
+const EMPTY_HINTS = { category: "", summary: "", synonym: "", first_letter: "" };
 // true when the current daily was restored as *already finished* from the server
 // (solved/gave up on another device, or as a now-merged guest) with no local guess
 // list — suppresses recordPlay/submitScore so we never clobber the real server row
@@ -718,6 +718,8 @@ const EMPTY_HINTS = { category: "", summary: "", first_letter: "" };
 let serverFinished = false;
 let gameStartedAt = 0;   // ms epoch when the current article first loaded (for play-log duration; persisted across daily resumes)
 let gameFinishedAt = 0;  // ms epoch when the game was solved/given up — freezes the play-log duration so it stops ticking after the finish (persisted across daily resumes)
+let playActiveMs = 0;    // accumulated ACTIVE play time (ms) for the time-score: counts only while the game is live AND the tab is visible (so leaving a daily for hours doesn't explode the score). Frozen at finish; persisted across daily resumes.
+let playTickAt = 0;      // ms epoch of the last play-time accrual tick (0 = paused: not running / tab hidden), so the next tick adds only the real elapsed active slice
 let mpCoopPlay = false;  // this game was played in co-op — logged to plays.coop. For a daily converted to co-op it's the ONLY marker (the daily keeps its game_type). Persisted across daily resumes.
 let currentPlayId = null;   // stable per-play key the `plays` upsert dedupes on (daily → puzzle_id; random/custom → minted id)
 const mintPlayId = () => (window.crypto && crypto.randomUUID)
@@ -950,6 +952,7 @@ function lockGame() {
 function checkWin() {
   if (titleKeyWords.length && titleKeyWords.every(t => t.revealed)) {
     solved = true;
+    accruePlayTime();                                   // fold in the final slice before the clock freezes (so the time-score is exact at the solve)
     if (!gameFinishedAt) gameFinishedAt = Date.now();   // freeze the duration at the solve moment (don't keep ticking on resume/summary/source)
     // reveal the whole article (and title) now that the game is over
     tokens.forEach(t => t.revealed = true);
@@ -973,6 +976,7 @@ function checkWin() {
 function giveUp() {
   if (solved || gaveUp) return;
   gaveUp = true;
+  accruePlayTime();                                   // fold in the final slice before the clock freezes (exact time-score at give-up)
   if (!gameFinishedAt) gameFinishedAt = Date.now();   // freeze the duration at the give-up moment
   tokens.forEach(t => t.revealed = true);
   draw();
@@ -1089,6 +1093,7 @@ const HINT_TIERS = [
   { key: "category",     label: "Category" },
   { key: "summary",      label: "Summary" },
   { key: "first_letter", label: "First letter" },
+  { key: "synonym",      label: "Synonym" },
   { key: "source",       label: "Source" },
 ];
 
@@ -1102,22 +1107,25 @@ function firstLetterHint() {
 }
 
 // the Edge Function returns the layered packet as a JSON string in `summary`; legacy
-// rows / puzzle.json hold a plain sentence — coerce both into {category,summary,first_letter}.
+// rows / puzzle.json hold a plain sentence — coerce all of these into
+// {category,summary,synonym,first_letter}. A packet from before the `synonym` tier
+// existed simply has no `synonym` key → it stays "" (the tier shows a placeholder).
 function parseHintPacket(raw) {
   if (!raw) return null;
   if (typeof raw === "object") return { ...EMPTY_HINTS, ...raw };
   try {
     const o = JSON.parse(raw);
-    if (o && typeof o === "object" && ("category" in o || "summary" in o || "first_letter" in o))
-      return { category: o.category || "", summary: o.summary || "", first_letter: o.first_letter || "" };
+    if (o && typeof o === "object" && ("category" in o || "summary" in o || "synonym" in o || "first_letter" in o))
+      return { category: o.category || "", summary: o.summary || "", synonym: o.synonym || "", first_letter: o.first_letter || "" };
   } catch { /* not JSON — a legacy plain-text summary sentence */ }
-  return { category: "", summary: String(raw), first_letter: "" };
+  return { category: "", summary: String(raw), synonym: "", first_letter: "" };
 }
 
 function tierContent(key) {
   if (key === "category") return hints.category || "(no category hint for this puzzle)";
   if (key === "summary") return hints.summary || "(no summary for this puzzle)";
   if (key === "first_letter") return "The title starts with “" + firstLetterHint() + "”.";
+  if (key === "synonym") return hints.synonym ? "Another word for it: “" + hints.synonym + "”." : "(no synonym for this puzzle)";
   if (key === "source") return "Source: " + labelForHost((META.source || {}).wiki || "an unknown wiki");
   return "";
 }
@@ -1169,6 +1177,9 @@ function addTier(key) {
   renderHints();
   // co-op: share the revealed tier + its packet so teammates see the same hint (no extra Groq call)
   if (mp.active && mp.mode === "coop") mp.broadcastHint(key);
+  // versus: a hint changed our score — push it to the standings now (renderHints alone
+  // doesn't, so opponents used to keep our stale score until our next guess/reveal)
+  if (mp.active) mp.publishProgress();
 }
 
 // reveal the source wiki (also used directly when the fandom isn't secret —
@@ -1177,13 +1188,14 @@ function revealSource() {
   if (!fandomUsed) { fandomUsed = true; saveDailyState(); }
   renderHints();
   if (mp.active && mp.mode === "coop") mp.broadcastHint("source");   // co-op: share the source tier
+  if (mp.active) mp.publishProgress();                               // versus: push the +source score to the standings now
 }
 
 async function revealTier(key) {
   if (solved || gaveUp) return;
   if (key === "source") { revealSource(); return; }
   if (key === "first_letter") { addTier(key); return; }
-  // category / summary: need the AI packet. Already have it → reveal immediately.
+  // category / summary / synonym: need the AI packet. Already have it → reveal immediately.
   if (hints && hints[key]) { addTier(key); return; }
   // a packet fetch is already in flight (the other AI tier) — wait for it rather than
   // firing a second request; when it lands the panel re-renders with this tier ready.
@@ -1215,6 +1227,7 @@ function initGame(title, blocks, meta) {
   hintTiers = []; hintLoading = null;
   guesses = []; guessed = new Set(); tokens = []; hintsLeft = 3; revealArmed = false; solved = false; summaryUsed = false; fandomUsed = false; gaveUp = false; serverFinished = false; mpCoopPlay = false;
   gameStartedAt = Date.now(); gameFinishedAt = 0;   // reset the clock; a daily resume overrides these with the saved start/finish (restoreDailyState)
+  playActiveMs = 0; playTickAt = 0;                 // reset the time-score accumulator (a daily resume restores the saved value)
   wordNav = new Map(); currentNavKey = null;   // reset history-navigation cursors for the new article
   titleToks = tokenize(title, "title");
   bodyBlocks = blocks.map(b => ({ tag: b.tag, toks: tokenize(b.text, "body") }));
@@ -1416,9 +1429,9 @@ async function fetchAndApplyHint(title, blocks) {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // Lazily fetch (and let the Edge Function cache, once, on the puzzle row) the
-// daily's hint packet. Returns the parsed {category,summary,first_letter} object,
-// "" when the puzzle has no usable hint (ready but empty), or null when it's still
-// pending after retries / errored.
+// daily's hint packet. Returns the parsed {category,summary,synonym,first_letter}
+// object, "" when the puzzle has no usable hint (ready but empty), or null when it's
+// still pending after retries / errored.
 async function requestDailyHint() {
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
@@ -1535,15 +1548,51 @@ async function loadRandomArticle(curated, host) {
     : "Couldn't fetch a random article right now — try again, or use a custom link.");
 }
 
-// The curated search — the same method as the nightly daily picker
-// (scripts/pick-daily.mjs#pickForWiki). Each round samples a generator=random
-// batch with prop=info, so every candidate's wikitext `length` and redirect
-// status come back UP FRONT: we reject bad titles, redirects and stubs cheaply
-// (no parse), sort the survivors longest-first, and only spend a parse call on
-// the most article-like pages. The quality bar relaxes past RELAX_FROM so even a
-// junk-heavy wiki (e.g. a comic-issue database) reliably yields a good article.
+// The most-revised (≈ most popular) ns=0 titles on a wiki, most-edited first — a
+// portable cross-wiki popularity proxy (Fandom has no PageViewInfo/HitCounters, so
+// edit count stands in for view count). Mirrors scripts/pick-daily.mjs#popularTitles.
+// Returns [] if the wiki lacks Mostrevisions, so the caller falls back to the random
+// search. Filtered to clean, fair titles via the shared badTitle.
+async function popularTitles(apiBase) {
+  try {
+    const data = await apiGet(apiBase, { action: "query", list: "querypage", qppage: "Mostrevisions", qplimit: "500", formatversion: "2" });
+    const rows = ((data.query || {}).querypage || {}).results || [];
+    return rows.filter(r => r && r.ns === 0 && r.title && !badTitle(r.title)).map(r => r.title);
+  } catch { return []; }
+}
+// quadratic bias toward the front (0 = most edited) — see pick-daily.mjs#biasedIndex.
+const biasedIndex = n => Math.floor(Math.pow(Math.random(), 2) * n);
+
+// The curated search. Stage 1 prefers the most-revised (popular) articles —
+// weight-sampled toward the top — so "Curated random" lands on recognizable pages
+// instead of obscure ones. Stage 2 is the original generator=random search (the same
+// method as the nightly daily picker, scripts/pick-daily.mjs#pickForWiki): each round
+// samples a batch with prop=info so every candidate's wikitext `length`/redirect status
+// come back UP FRONT (reject bad titles, redirects and stubs cheaply, parse only
+// promising pages), with the quality bar relaxing past RELAX_FROM so even a junk-heavy
+// wiki (e.g. a comic-issue database) reliably yields a good article. Stage 2 is reached
+// when a wiki has no Mostrevisions, or its popular pages were all unsuitable.
 async function loadCuratedArticle(pool, host) {
   const status = document.getElementById("status");
+  // Stage 1: popular (most-revised) articles, weight-sampled toward the top.
+  for (let n = 0; n < 4; n++) {
+    const wiki = host || pool[Math.floor(Math.random() * pool.length)];
+    try {
+      const apiBase = await resolveApiBase("https://" + wiki);
+      setStatus(host ? "Finding a popular page on " + labelForHost(wiki) + "…" : "Finding a popular article…");
+      const titles = await popularTitles(apiBase);
+      for (let k = 0; k < 5 && titles.length; k++) {
+        const title = titles.splice(biasedIndex(titles.length), 1)[0];
+        try {
+          await loadArticle(apiBase, wiki, { page: title },
+            { minChars: 1200, maxChars: 20000, minParas: 4, requireCleanTitle: true, revealFandom: !!host, gameType: host ? "fandom_random" : "curated_random" });
+          return;   // loaded a popular, quality-checked article
+        } catch { /* stub/too long/unsuitable — sample another popular title */ }
+      }
+    } catch { /* this wiki / Mostrevisions unavailable — try another (or fall through) */ }
+    if (host) break;   // a single host: one popular fetch is enough, then the random fallback
+  }
+  // Stage 2: the original generator=random curated search.
   const ATTEMPTS = 14, RELAX_FROM = 6;
   const tried = new Set();   // don't re-parse a candidate we've already rejected
   for (let i = 0; i < ATTEMPTS; i++) {
@@ -1774,27 +1823,51 @@ function buildShareUrl() {
 }
 
 // share icon for each hint tier (same least→most order as HINT_TIERS / the panel)
-const SHARE_ICON = { category: "📂", summary: "📄", first_letter: "🔤", source: "🏷️" };
+const SHARE_ICON = { category: "📂", summary: "📄", first_letter: "🔤", synonym: "🔁", source: "🏷️" };
 
 /* ---- score: lower is better -------------------------------------------------
-   A correct typed guess is free (+0); every bit of help adds points. Penalties:
+   A correct typed guess is free (+0); every bit of help — and time — adds points.
+   Penalties: +1 for every full 10s of active play (per10s, see accruePlayTime),
    wrong guess +1, free word reveal +5, the source/summary/category hint tiers +10
-   each, the first-letter tier +20. Derived purely from the same play state the
-   share line uses (guesses / hintTiers / fandomUsed), so the live pill, the share
-   text and the win banner can never disagree. */
-const SCORE = { wrongGuess: 1, reveal: 5, category: 10, summary: 10, first_letter: 20, source: 10 };
+   each, the first-letter tier +20, the synonym tier +30 (most revealing). Derived
+   purely from the same play state the
+   share line uses (guesses / hintTiers / fandomUsed / playActiveMs), so the live
+   pill, the share text and the win banner can never disagree. The time component
+   freezes at the finish and pauses while the tab is hidden. */
+const SCORE = { wrongGuess: 1, reveal: 5, category: 10, summary: 10, first_letter: 20, synonym: 30, source: 10, per10s: 1 };
 function computeScore() {
   if (!guesses) return 0;
   const bad = guesses.filter(g => !g.hint && g.hits === 0).length;   // wrong typed guesses
   const reveals = guesses.filter(g => g.hint).length;                // paid free-word reveals
   let s = bad * SCORE.wrongGuess + reveals * SCORE.reveal;
-  (hintTiers || []).forEach(k => { s += SCORE[k] || 0; });           // category / summary / first_letter
+  (hintTiers || []).forEach(k => { s += SCORE[k] || 0; });           // category / summary / first_letter / synonym
   if (fandomUsed) s += SCORE.source;                                 // source tier
+  s += Math.floor(playActiveMs / 10000) * SCORE.per10s;              // +1 for every full 10s of active play (frozen at finish)
   return s;
 }
 
-// repaint the live score pill — called on every guess/reveal (refreshMeta) and on
-// every hint-tier reveal (renderHints), so it tracks the game in real time.
+// is the play clock running RIGHT NOW? Only while the game is live (started, not
+// finished), the tab is visible, and — in versus — the match has actually begun (so the
+// pre-Play waiting overlay doesn't accrue time). This is the gate for accruePlayTime.
+function playClockRunning() {
+  if (!gameStartedAt || gameFinishedAt) return false;
+  if (typeof document !== "undefined" && document.hidden) return false;
+  if (mp.active && mp.mode === "versus" && !mp.started) return false;
+  return true;
+}
+// fold the time since the last tick into playActiveMs (capped per call so a system
+// sleep / throttled-timer gap can't dump a huge chunk), then advance the marker. A
+// no-op while paused — which is how leaving the tab / finishing freezes the time-score.
+function accruePlayTime() {
+  if (!playClockRunning()) { playTickAt = 0; return; }
+  const now = Date.now();
+  if (playTickAt) playActiveMs += Math.min(now - playTickAt, 2000);
+  playTickAt = now;
+}
+
+// repaint the live score pill — called on every guess/reveal (refreshMeta), every
+// hint-tier reveal (renderHints) and once a second by the score clock, so it tracks the
+// game (including the time penalty) in real time.
 function updateScore() {
   const el = document.getElementById("scoreVal");
   if (el) el.textContent = computeScore();
@@ -2183,7 +2256,8 @@ function saveDailyState() {
       gaveUp: !!gaveUp,
       coop: !!mpCoopPlay,   // a daily done co-op stays flagged across a same-day reload (the room itself is ephemeral)
       startedAt: gameStartedAt || null,   // keep the original start so a same-day resume reports honest duration
-      finishedAt: gameFinishedAt || null   // keep the frozen finish so a resume doesn't keep the clock ticking past the solve/give-up
+      finishedAt: gameFinishedAt || null,  // keep the frozen finish so a resume doesn't keep the clock ticking past the solve/give-up
+      playActiveMs: playActiveMs || 0     // accrued ACTIVE play time → the time-score resumes where it left off (away time isn't re-added)
     }));
   } catch { /* storage blocked (private mode / file://) — progress just won't persist */ }
 }
@@ -2227,6 +2301,7 @@ async function restoreDailyState() {
   if (typeof saved.hintsLeft === "number") hintsLeft = Math.max(0, saved.hintsLeft);
   if (typeof saved.startedAt === "number" && saved.startedAt > 0) gameStartedAt = saved.startedAt;   // honest duration across resumes
   if (typeof saved.finishedAt === "number" && saved.finishedAt > 0) gameFinishedAt = saved.finishedAt;   // restore the frozen finish so the duration stays put
+  if (typeof saved.playActiveMs === "number" && saved.playActiveMs >= 0) playActiveMs = saved.playActiveMs;   // resume the time-score where it left off
   mpCoopPlay = !!saved.coop;             // keep the "this daily was done co-op" flag across a reload (the room is gone, but plays.coop must stay)
   draw(); refreshMeta();
   checkWin();                             // marks solved + reveals all if the saved game was won
@@ -3088,6 +3163,24 @@ function onMobileMqChange() { topbarEl.classList.remove("topbar--hidden"); place
 if (mqMobile.addEventListener) mqMobile.addEventListener("change", onMobileMqChange);
 else mqMobile.addListener(onMobileMqChange);
 
+/* ---- the live score clock: the time penalty climbs +SCORE.per10s every 10s of ACTIVE
+   play (see accruePlayTime / playClockRunning). Once a second we accrue the elapsed
+   slice and, when the displayed score actually changed, repaint the pill — and in
+   versus rebroadcast our progress so opponents' standings tick up live too. Freezes at
+   the finish and pauses while the tab is hidden. */
+let scoreClockLast = -1;
+setInterval(() => {
+  accruePlayTime();
+  const s = computeScore();
+  if (s === scoreClockLast) return;   // nothing changed this second — skip the repaint/broadcast
+  scoreClockLast = s;
+  updateScore();
+  if (mp.active && mp.mode === "versus" && mp.started) mp.publishProgress();
+}, 1000);
+// don't count time spent on another tab/app: reset the accrual marker on visibility flips
+// (hidden → pause; visible → restart the slice from now, so no away-time jumps in).
+document.addEventListener("visibilitychange", () => { playTickAt = document.hidden ? 0 : Date.now(); });
+
 /* ===========================================================================
    MULTIPLAYER (mp) — realtime co-op + versus over Supabase Realtime.
 
@@ -3387,6 +3480,7 @@ const mp = {
     if (this.role === "host") return;
     this.started = true; this.startAt = startAt || Date.now();
     gameStartedAt = this.startAt; gameFinishedAt = 0;
+    playActiveMs = 0; playTickAt = 0;   // the versus clock (and time-score) begins at Play, not at article load
     this._exitWaiting();
   },
   // host (co-op): replay the current shared board to a newcomer
@@ -3437,6 +3531,7 @@ const mp = {
   startMatch() {
     this.started = true; this.startAt = Date.now();
     gameStartedAt = this.startAt; gameFinishedAt = 0;
+    playActiveMs = 0; playTickAt = 0;   // the versus clock (and time-score) begins at Play, not at article load
     this.send("start", { startAt: this.startAt });
     this._track();                 // republish cfg.started for late joiners
     this._exitWaiting();

@@ -35,16 +35,23 @@ a standalone Node script run by GitHub Actions.
   it to the browser.
 - **Hints are a layered packet, generated lazily (once) and cached.** A single Groq
   call returns **all hint tiers at once** as a JSON object — `{category, summary,
-  first_letter}` — so revealing tiers never costs extra API calls (important against
-  Groq's per-minute request limit). The model writes only `category` + `summary`
-  (`response_format: json_object`); **`first_letter` is computed server-side** from the
-  authoritative title (never trusted to the model), and is the one tier the per-field
-  leak filter skips. (Both the server `firstLetterOf` and the client `firstLetterHint`
-  match a Unicode letter/number, so an accented/non-Latin title reports its real first
-  character.) The JSON string is stored verbatim in **`puzzles.summary`** (still a
-  `text` column — no migration) and parsed client-side (`parseHintPacket`, which also
-  copes with **legacy plain-sentence** summaries and the [puzzle.json](puzzle.json)
-  fallback by treating the whole string as the `summary` tier). The first player to
+  synonym, first_letter}` — so revealing tiers never costs extra API calls (important
+  against Groq's per-minute request limit; the whole call is ~910 tokens — well under the
+  free tier's 12K TPM / 30 RPM, and the article excerpt is capped at 1500 chars). The
+  model writes `category` + `summary` + `synonym` (`response_format: json_object`);
+  **`first_letter` is computed server-side** from the authoritative title (never trusted
+  to the model), and is the one tier the per-field leak filter skips. (Both the server
+  `firstLetterOf` and the client `firstLetterHint` match a Unicode letter/number, so an
+  accented/non-Latin title reports its real first character.) **`synonym`** is a 1-4 word
+  near-equivalent of the title's main word(s) — deliberately the most revealing AI tier
+  (costs **+30**, see **Score**) — but it still goes through the per-field leak filter, so
+  it can be close in meaning yet never literally contains a title word. The JSON string is
+  stored verbatim in **`puzzles.summary`** (still a `text` column — no migration) and
+  parsed client-side (`parseHintPacket`, which also copes with **legacy plain-sentence**
+  summaries, the [puzzle.json](puzzle.json) fallback by treating the whole string as the
+  `summary` tier, AND a **pre-`synonym` packet** by leaving `synonym` empty → that tier
+  shows a placeholder on dailies cached before this tier existed; freshly-generated
+  dailies and all random/custom games include it). The first player to
   reveal an AI tier triggers the `hint` Edge Function, which generates via Groq and
   writes the result back to `puzzles.summary`. Concurrent first-clickers are de-duped by
   an **atomic claim** on `puzzles.summary_generating_at` (`UPDATE … WHERE summary IS NULL
@@ -52,10 +59,12 @@ a standalone Node script run by GitHub Actions.
   Random/custom games call the same function with no `puzzleId` → generate, no cache.
   **UI** ([index.html](index.html)): a single **"Hints"** button (`#hintsBtn`, next to
   "Reveal a word") opens the `#hintbox` panel, rebuilt by **`renderHints()`** — one row
-  per tier, least→most revealing: **Category → Summary → First letter → Source**. Each
-  tier has its own **Reveal** button (`revealTier(key)`); `first_letter` is derived
-  locally (`firstLetterHint()`, instant — no fetch even if the AI hint never landed) and
-  **Source** folds in the old `showFandom` (`revealSource()` / `fandomUsed`). Which AI/
+  per tier, least→most revealing: **Category → Summary → First letter → Synonym →
+  Source**. Each tier has its own **Reveal** button (`revealTier(key)`); `first_letter` is
+  derived locally (`firstLetterHint()`, instant — no fetch even if the AI hint never
+  landed), `synonym` (like category/summary) comes from the AI packet (revealed instantly
+  if already fetched, else lazily generated), and **Source** folds in the old `showFandom`
+  (`revealSource()` / `fandomUsed`). Which AI/
   letter tiers were shown is tracked in **`hintTiers`** (persisted in the daily
   localStorage state and restored into the panel); `summaryUsed` stays the rollup boolean
   (any AI/letter tier used) for the `plays` `summary_used` column, `fandomUsed`/
@@ -99,9 +108,9 @@ the target rewrite the text). Three lines under the headline:
 - the exact counts line: `✅ N good  ❌ N bad  💡 N reveal(s)`.
 - a **per-tier hint breakdown** — one icon+label per hint actually used, in the same
   least→most order as the Hints panel: **📂 category · 📄 summary · 🔤 first letter ·
-  🏷️ source** (`SHARE_ICON` + `HINT_TIERS`, gated on `hintTiers` / `fandomUsed`). This
-  replaced the old single generic `📄 hints` marker — when you add a hint tier, add its
-  icon to `SHARE_ICON` so it shows here too.
+  🔁 synonym · 🏷️ source** (`SHARE_ICON` + `HINT_TIERS`, gated on `hintTiers` /
+  `fandomUsed`). This replaced the old single generic `📄 hints` marker — when you add a
+  hint tier, add its icon to `SHARE_ICON` so it shows here too.
 
 - a **score line** — `🎯 Score N (lower is better)` (see **Score** below).
 
@@ -112,20 +121,41 @@ way (the source wiki is itself a paid hint). Covered by the two share tests in
 ## Score (lower is better)
 
 A golf-style score: **the goal is the lowest total**. A correct typed guess is free
-(`+0`); every bit of help adds points — **wrong guess `+1`, free word reveal `+5`, the
+(`+0`); every bit of help — **and time** — adds points: **`+1` for every full 10 seconds
+of active play** (`SCORE.per10s`), **wrong guess `+1`, free word reveal `+5`, the
 **source** / **summary** / **category** hint tiers `+10` each, the **first-letter** tier
-`+20`. The point values live in the `SCORE` map and `computeScore()` derives the total
+`+20`, the **synonym** tier `+30` (the most revealing). The point values live in the
+`SCORE` map and `computeScore()` derives the total
 **purely from the same play state the share line uses** (`guesses` → bad/reveal counts,
-`hintTiers`, `fandomUsed`) — so the live pill, the share text and the win/give-up banner
-can never disagree (no separately-tracked counter to drift). `computeScore()` is defined
-next to `buildShareText()`.
+`hintTiers`, `fandomUsed`, plus `playActiveMs`) — so the live pill, the share text and the
+win/give-up banner can never disagree (no separately-tracked counter to drift).
+`computeScore()` is defined next to `buildShareText()`.
+
+**The time component counts ACTIVE play, not wall-clock.** It's `floor(playActiveMs /
+10000) * SCORE.per10s` (currently `+1` per 10s), where `playActiveMs` accrues **only while the game is live AND the tab is
+visible** (`accruePlayTime()` / `playClockRunning()`). This is deliberately NOT the same as
+the play-log's `duration_seconds` (which is honest wall-clock, idle included) — a daily you
+leave open for hours must **not** explode the score. So: each tick folds in the elapsed
+slice **capped at 2s** (a system-sleep / throttled-timer gap can't dump a huge chunk), a
+`visibilitychange` listener pauses/resumes the marker, and the value **freezes at the
+finish** (`accruePlayTime()` is flushed in `checkWin`/`giveUp` right before `gameFinishedAt`
+is stamped; once finished `playClockRunning()` is false so it stops). `playActiveMs` is
+**persisted in the daily localStorage state** and restored by `restoreDailyState`, so a
+same-day resume continues where it left off **without** re-adding the away time. It resets
+in `initGame`, and again at the **versus** match start (`startMatch` / `_applyStart`) so the
+versus time-score begins at **Play**, not at article load. **In versus** the time-score is
+per-player (each races their own active clock); **in co-op** each client accrues its own
+active time (guess-based points are identical across the shared board, the time component
+may differ slightly per player).
 
 Shown **live** in a `#scorePill` (`Score: <b id="scoreVal">`) in the `.statusbar` — visible
 on both desktop and mobile (the status *message* is hidden on mobile, but the pill stays).
-`updateScore()` repaints it and is called from **`refreshMeta()`** (every guess/reveal) and
-**`renderHints()`** (every hint-tier reveal), so it tracks in real time. It also lands in
-the **share text** (`buildShareText`) and the **win / give-up banner** (`checkWin`/`giveUp`).
-When you add a new hint tier or paid action, add its cost to `SCORE`.
+`updateScore()` repaints it and is called from **`refreshMeta()`** (every guess/reveal),
+**`renderHints()`** (every hint-tier reveal), and a **1-second score clock** (`setInterval`,
+near `placeHintbox`) that accrues the time slice, repaints **only when the displayed score
+changed**, and — **in versus** — re-broadcasts progress so opponents' standings tick up live.
+It also lands in the **share text** (`buildShareText`) and the **win / give-up banner**
+(`checkWin`/`giveUp`). When you add a new hint tier or paid action, add its cost to `SCORE`.
 
 **Persisted for stats**: `recordPlay()` writes `computeScore()` into the **`plays.score`**
 column (migration `20260615120000_add_plays_score.sql`, nullable — pre-column rows just
@@ -205,7 +235,13 @@ presence — already bundled in `supabase-js@2`, otherwise unused). **Requires a
   to presence **`sync` AND `join`/`leave`** (a peer's re-`track()` can surface as join/leave, not
   only sync — listening to all three is what stops opponents' stats freezing after join);
   `_enterRoom` re-`track()`s once the article's loaded; and `publishProgress` repaints your OWN
-  row too (presence echoes don't return to the sender).
+  row too (presence echoes don't return to the sender). **`publishProgress` must fire on
+  EVERY scoring action, not just guesses:** `refreshMeta` calls it (guess/reveal), but a
+  **hint reveal** goes through `renderHints` (not `refreshMeta`), so `addTier`/`revealSource`
+  **also** call `mp.publishProgress()` — otherwise an opponent kept your stale score until
+  your next guess (the `+10`/`+20` from a hint didn't show). The **1-second score clock** (see
+  **Score**) likewise re-broadcasts in versus so the **time penalty** ticks up on opponents'
+  standings live.
 
 The in-game HUD (`#mpPanel`, docked at the top of `#controlcol`) shows a **"Copy invite link"**
 button (`#mpCopyBtn` — **no raw link text** anywhere, per user pref; the URL goes to the clipboard
@@ -625,13 +661,43 @@ one row per date has **`is_featured = true`** — the home-page / anonymous puzz
 ([scripts/pick-daily.mjs](scripts/pick-daily.mjs)) loops **all enabled wikis**, picks one
 good article each (no AI — cheap), and flags one as featured.
 
-`pickForWiki` uses **`generator=random` + `prop=info`** so each candidate's wikitext
-`length` and redirect status come back up front — bad titles, redirects and stubs are
-rejected cheaply (no parse), and only promising pages (longest-first) get a `parse` call.
-That keeps each round cheap, so it samples up to `ATTEMPTS` (40) rounds × 10 with early
-exit — enough to reliably find an article even on junk-heavy wikis (comic-issue DBs like
-marvel/dc, which fail ~74% of the time with naive `list=random`). Not a hard 100%, but
-close; if a wiki still misses a day the feed shows "—" for it and it retries next run.
+`pickForWiki` is **two-stage**:
+
+1. **Popularity-first (the usual path).** It pulls the wiki's **most-revised articles**
+   (`list=querypage&qppage=Mostrevisions`, paged up to `POPULAR_WANT` = 1000) and
+   weight-samples one toward the top (`biasedIndex` — quadratic bias, so the famous top
+   gets most picks but with enough spread). **Edit count is our portable popularity
+   proxy**: Fandom does **not** expose real view counts (PageViewInfo's `list=mostviewed`/
+   `prop=pageviews` are unrecognized, and `Popularpages`/HitCounters was removed from
+   MediaWiki core), and there's **no cross-wiki "vital/featured articles" standard**
+   (e.g. `Category:Featured articles` exists on minecraft.wiki but not harrypotter, and
+   Wookieepedia uses a non-flat nomination system) — but `Mostrevisions` is a cached,
+   pre-ranked QueryPage available on Fandom + generic MediaWiki + Wikipedia, and its top
+   is reliably the iconic pages (Harry Potter → "Triwizard Tournament", DC → "Green
+   Lantern Ring"…). Candidates already used (in the 365-day `picked` window) are filtered
+   out, so the daily **never repeats** and the bias naturally works deeper into the list
+   over the year. **Window sizing matters:** the picker consumes ~365 picks/year/wiki and
+   won't repeat within `EXPIRE_DAYS` (365), so the popular window MUST exceed 365 — that's
+   why we pull up to 1000 (a top-300 would force a random fallback for ~65 days/year).
+2. **Random fallback** (the original method): **`generator=random` + `prop=info`** so each
+   candidate's wikitext `length`/redirect status come back up front — bad titles,
+   redirects and stubs are rejected cheaply (no parse), and only promising pages
+   (longest-first) get a `parse` call. It samples up to `ATTEMPTS` (50) rounds × 10 with
+   early exit. **Reached when** a wiki has no `Mostrevisions` (e.g. Wikipedia often falls
+   through), or its popular titles are all unsuitable/exhausted — i.e. small/junk-heavy
+   wikis (comic-issue DBs like marvel/dc, which fail ~74% with naive `list=random`).
+
+Both stages share `tryArticle()` (parse → `badTitle`/dedup/`probe` quality gate) and the
+`thresholds(round)` ladder (strict until `RELAX_FROM`, then easing). Picks are logged
+`[popular]` vs `[relaxed @round N]`, and the run summary counts both. Not a hard 100%; if
+a wiki still misses a day the feed shows "—" for it and it retries next run.
+
+The **client "Curated random"** (`loadCuratedArticle` in index.html) mirrors this exactly:
+a popularity-first stage (its own `popularTitles(apiBase)` + `biasedIndex`, single
+`qplimit=500` fetch since it's a one-shot with no `picked` dedup) then the original
+random-rounds search as fallback. The two helpers are duplicated client↔picker (like
+`badTitle`/the leak filter) — change one, change the other. The picker's `cleanPopularTitles`
++ `biasedIndex` are **exported** and unit-tested in [tests/picker.spec.mjs](tests/picker.spec.mjs).
 
 - **Daily progress / state** is keyed by **puzzle id** (`stateKey(dailyPuzzleId)`), not
   date — fandoms share a date, so date-keying would collide.

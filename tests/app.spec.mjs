@@ -159,6 +159,43 @@ test("share text breaks down good/bad guesses, reveals and help used", async ({ 
   expect(clip).toMatch(/[🟩⬛]{10}/u);            // the proportional accuracy bar
 });
 
+test("score adds a time penalty: +1 for every full 10s of active play", async ({ page }) => {
+  // baseline: a fresh game with no guesses and ~no elapsed time scores 0
+  expect(await page.evaluate(() => computeScore())).toBe(0);
+
+  // 25s of accrued active play → floor(25/10)*1 = 2 points (the live pill reflects it)
+  await page.evaluate(() => { playActiveMs = 25_000; updateScore(); });
+  expect(await page.evaluate(() => computeScore())).toBe(2);
+  await expect(page.locator("#scoreVal")).toHaveText("2");
+
+  // a wrong guess (+1) stacks on top of the time penalty
+  await page.fill("#guess", "zzzzzz"); await page.press("#guess", "Enter");
+  expect(await page.evaluate(() => computeScore())).toBe(3);
+
+  // the time component freezes at the finish (gameFinishedAt set) — more wall-clock
+  // afterwards doesn't keep adding, because accruePlayTime stops once finished
+  await page.evaluate(() => { gameFinishedAt = Date.now(); const before = playActiveMs; accruePlayTime(); if (playActiveMs !== before) throw new Error("clock kept ticking after finish"); });
+});
+
+test("synonym tier: reveals the AI synonym, costs +30, and shows in the share", async ({ page }) => {
+  // the stubbed hint function returns no packet here, so inject one carrying a synonym
+  await page.evaluate(() => { hints = { category: "", summary: "", synonym: "Automobile", first_letter: "" }; });
+  await page.click("#hintsBtn");
+  // the synonym row sits between First letter and Source in the panel
+  const row = page.locator('.hint-tier[data-tier="synonym"]');
+  await expect(row).toBeVisible();
+  await row.locator(".hint-reveal").click();
+  await expect(row.locator(".hint-tier-val")).toContainText("Automobile");
+
+  // it's the priciest tier: +30 (no guesses, time zeroed so the pill is exactly the tier cost)
+  await page.evaluate(() => { playActiveMs = 0; playTickAt = 0; updateScore(); });
+  await expect(page.locator("#scoreVal")).toHaveText("30");
+
+  // and it surfaces in the share breakdown with its own icon
+  const share = await page.evaluate(() => buildShareText());
+  expect(share).toContain("🔁 synonym");
+});
+
 test("used hints survive a reload (summary comes back, reflected in share)", async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.click("#hintsBtn");

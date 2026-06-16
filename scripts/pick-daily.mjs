@@ -57,6 +57,11 @@ const ATTEMPTS = 50;       // random rounds (×10 candidates) per wiki, with ear
 const RELAX_FROM = 20;     // rounds 0..19 use the strict thresholds above; from round 20 the
                            // quality bar eases linearly toward round ATTEMPTS so a stubborn wiki
                            // still yields *something* before we fall back to reusing an old daily.
+const POPULAR_WANT = 1000; // how many most-revised titles to pull (Mostrevisions caps at 1000).
+                           // Must comfortably exceed 365 picks/year/wiki so the 365-day no-repeat
+                           // window never forces a fallback to random on a content-rich wiki.
+const POPULAR_TRIES = 12;  // weight-sampled popular candidates to parse-verify before giving up
+                           // on the popularity path and falling back to the random search.
 
 // the quality gate for a given round: strict until RELAX_FROM, then progressively
 // looser. We never relax badTitle — a title with digits/parens is an unfair puzzle.
@@ -199,13 +204,87 @@ async function recordPicked(wiki, title, date) {
   } catch { /* non-fatal — dedup just won't include this one next time */ }
 }
 
+// Keep only clean main-namespace (ns=0) titles from a Mostrevisions result set —
+// drops talk/template/user pages and unfair titles (digits/parens/lists/…). Pure,
+// so it's unit-tested. The list comes back most-edited-first; we preserve that order.
+export function cleanPopularTitles(results) {
+  return (results || [])
+    .filter(r => r && r.ns === 0 && r.title && !badTitle(r.title))
+    .map(r => r.title);
+}
+
+// The most-revised articles on a wiki ≈ its most popular/iconic pages — a far better
+// daily than a uniformly random page. Mostrevisions is a cached, pre-ranked QueryPage
+// available on Fandom + generic MediaWiki (Wikipedia too); PageViewInfo/HitCounters
+// (real view counts) are NOT enabled on Fandom, so edit count is our portable
+// cross-wiki popularity proxy. Returns clean ns=0 titles (most-edited first), paging
+// up to POPULAR_WANT; [] if the wiki lacks the query so the caller falls back to the
+// random search.
+async function popularTitles(wiki, want = POPULAR_WANT) {
+  const titles = [];
+  let offset = 0;
+  try {
+    while (titles.length < want) {
+      const res = await api(wiki, {
+        action: "query", list: "querypage", qppage: "Mostrevisions",
+        qplimit: "500", qpoffset: String(offset),
+      });
+      const rows = res.query?.querypage?.results || [];
+      if (!rows.length) break;
+      titles.push(...cleanPopularTitles(rows));
+      const next = res.continue?.qpoffset;
+      if (next == null) break;
+      offset = next;
+    }
+  } catch { /* Mostrevisions unavailable/disabled — caller falls back to random */ }
+  return titles;
+}
+
+// Pick an index biased toward the front (0 = most edited). Quadratic bias gives the
+// famous top ~25% roughly half the picks, but enough spread that we don't always serve
+// the same handful — and, combined with the dedup `seen` set, that the picker naturally
+// works deeper into the list over the year as the most-famous pages get consumed.
+export const biasedIndex = n => Math.floor(Math.pow(Math.random(), 2) * n);
+
+// Parse + quality-check one candidate title. Returns the puzzle pointer
+// ({wiki, revision_id, title, chars, paras}) or null if it's unsuitable (bad/duplicate
+// resolved title, too short/long/thin, or the parse failed).
+async function tryArticle(wiki, title, th, seen) {
+  // Whole body in the try: a transient API error OR a malformed response (no `parse`
+  // object, odd `text` shape) must yield null, never an uncaught throw — pickForWiki and
+  // the main loop don't guard this, so a throw here would abort the entire run.
+  try {
+    const parsed = await api(wiki, { action: "parse", page: title, prop: "text|revid", redirects: "1" });
+    const realTitle = parsed.parse.title;
+    const revid = parsed.parse.revid;
+    if (badTitle(realTitle) || seen.has(pickedKey(wiki, realTitle))) return null;
+    const html = typeof parsed.parse.text === "string" ? parsed.parse.text : parsed.parse.text["*"];
+    const { chars, paras } = probe(html);
+    if (chars < th.minChars || chars > th.maxChars || paras < th.minParas) return null;
+    return { wiki, revision_id: revid, title: realTitle, chars, paras };
+  } catch { return null; }
+}
+
 // Find one good article on a SINGLE wiki (used once per fandom per day).
-// Uses generator=random + prop=info so we get each candidate's wikitext length and
-// redirect status UP FRONT — letting us reject bad titles, redirects and stubs
-// cheaply (no parse) and only spend a parse call on promising pages. That makes
-// each round cheap, so we can sample many rounds and reliably find a good article
-// even on wikis dominated by junk pages (e.g. comic-issue databases).
+// Stage 1 — popularity-first: weight-sample the most-revised (≈ most popular) articles,
+//   skipping any already used within the 365-day window, so the daily lands on a
+//   recognizable page and never repeats. (A content-rich wiki has far more than 365
+//   clean popular titles, so this never runs dry; as the famous ones get consumed the
+//   bias naturally works deeper into the list.)
+// Stage 2 — fallback: the original generator=random search. Uses prop=info so each
+//   candidate's wikitext length + redirect status come back UP FRONT (reject bad
+//   titles, redirects and stubs cheaply, parse only promising pages). Reached when the
+//   wiki has no Mostrevisions, or its popular titles are exhausted/unsuitable — i.e.
+//   small/junk-heavy wikis (comic-issue databases), which is what this stage was for.
 async function pickForWiki(wiki, seen, rounds = ATTEMPTS) {
+  // Stage 1: popular articles (most-revised), weight-sampled toward the top.
+  const popular = (await popularTitles(wiki)).filter(t => !seen.has(pickedKey(wiki, t)));
+  for (let n = 0; n < POPULAR_TRIES && popular.length; n++) {
+    const title = popular.splice(biasedIndex(popular.length), 1)[0];   // take it out so we don't retry it
+    const f = await tryArticle(wiki, title, thresholds(0), seen);      // strict bar — popular pages are substantial
+    if (f) return { ...f, popular: true };
+  }
+  // Stage 2: random search (loosening past RELAX_FROM).
   for (let i = 0; i < rounds; i++) {
     const th = thresholds(i);   // strict early, looser past RELAX_FROM
     let res;
@@ -224,16 +303,8 @@ async function pickForWiki(wiki, seen, rounds = ATTEMPTS) {
         && !seen.has(pickedKey(wiki, p.title)))
       .sort((a, b) => b.length - a.length);
     for (const c of candidates) {
-      try {
-        const parsed = await api(wiki, { action: "parse", page: c.title, prop: "text|revid", redirects: "1" });
-        const realTitle = parsed.parse.title;
-        const revid = parsed.parse.revid;
-        if (badTitle(realTitle) || seen.has(pickedKey(wiki, realTitle))) continue;
-        const html = typeof parsed.parse.text === "string" ? parsed.parse.text : parsed.parse.text["*"];
-        const { chars, paras } = probe(html);
-        if (chars < th.minChars || chars > th.maxChars || paras < th.minParas) continue;
-        return { wiki, revision_id: revid, title: realTitle, chars, paras, round: i, relaxed: i >= RELAX_FROM };
-      } catch { /* try the next candidate */ }
+      const f = await tryArticle(wiki, c.title, th, seen);
+      if (f) return { ...f, round: i, relaxed: i >= RELAX_FROM };
     }
   }
   return null;
@@ -317,15 +388,16 @@ if (isMain) (async () => {
   // One daily per fandom: pick a good article on each enabled wiki. If even the
   // relaxed search fails, reuse an earlier daily so the feed never has a gap.
   const found = [];
-  let relaxedN = 0, carriedN = 0;
+  let relaxedN = 0, carriedN = 0, popularN = 0;
   for (const host of hosts) {
     const f = await pickForWiki(host, seen);
     if (f) {
       seen.add(pickedKey(host, f.title));      // avoid re-picking within this run
       found.push(f);
+      if (f.popular) popularN++;
       if (f.relaxed) relaxedN++;
       console.log(`  ${host}: "${f.title}" @${f.revision_id} (${f.chars} chars, ${f.paras} paras)` +
-        (f.relaxed ? ` [relaxed @round ${f.round + 1}]` : ""));
+        (f.popular ? " [popular]" : f.relaxed ? ` [relaxed @round ${f.round + 1}]` : ""));
       continue;
     }
     const revid = await pastDailyFor(host);
@@ -349,7 +421,7 @@ if (isMain) (async () => {
     is_featured: i === featuredIdx,
   }));
   console.log(`Generated ${rows.length}/${hosts.length} dailies for ${DATE} ` +
-    `(${relaxedN} relaxed, ${carriedN} reused); featured: ${found[featuredIdx].wiki}.`);
+    `(${popularN} popular, ${relaxedN} relaxed, ${carriedN} reused); featured: ${found[featuredIdx].wiki}.`);
 
   if (DRY) { console.log("Dry run — nothing written. Rows:", JSON.stringify(rows)); return; }
 

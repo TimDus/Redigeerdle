@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { badTitle, probe, pickedKey, stripTags } from "../scripts/pick-daily.mjs";
+import { badTitle, probe, pickedKey, stripTags, cleanPopularTitles, biasedIndex } from "../scripts/pick-daily.mjs";
 import { leaksTitle } from "../scripts/lib/leak-filter.mjs";
 
 // Pure-function unit tests for the daily picker (scripts/pick-daily.mjs). No
@@ -57,6 +57,49 @@ test("pickedKey is wiki + lowercased title (dedup key is case-insensitive)", () 
   // same article, different title casing → same key, so it dedupes
   expect(pickedKey("zelda.fandom.com", "Master Sword"))
     .toBe(pickedKey("zelda.fandom.com", "MASTER SWORD"));
+});
+
+test.describe("cleanPopularTitles — only clean main-namespace titles from Mostrevisions", () => {
+  test("keeps ns=0 article titles in order, drops other namespaces and bad titles", () => {
+    const results = [
+      { ns: 0, title: "Harry Potter", value: "14249" },     // most-edited article — keep
+      { ns: 4, title: "Harry Potter Wiki:About", value: "9" }, // project page — drop (ns≠0)
+      { ns: 10, title: "Template:Information", value: "8" },   // template — drop (ns≠0)
+      { ns: 0, title: "Hermione Granger", value: "7341" },     // article — keep
+      { ns: 0, title: "Chapter 1", value: "50" },              // unfair title — drop (badTitle)
+      { ns: 0, title: "Anakin Skywalker/Legends", value: "5" }, // slash → drop (badTitle)
+    ];
+    expect(cleanPopularTitles(results)).toEqual(["Harry Potter", "Hermione Granger"]);
+  });
+
+  test("tolerates null / empty input", () => {
+    expect(cleanPopularTitles(null)).toEqual([]);
+    expect(cleanPopularTitles([])).toEqual([]);
+    expect(cleanPopularTitles([{ ns: 0 }])).toEqual([]);   // no title
+  });
+});
+
+test.describe("biasedIndex — in-range and biased toward the front", () => {
+  const withRandom = (val, fn) => {
+    const orig = Math.random;
+    Math.random = () => val;
+    try { return fn(); } finally { Math.random = orig; }
+  };
+
+  test("r=0 → index 0; r→1 stays below n; r=0.5 lands in the front quarter (quadratic bias)", () => {
+    expect(withRandom(0, () => biasedIndex(100))).toBe(0);
+    expect(withRandom(0.9999, () => biasedIndex(100))).toBe(99);   // never reaches n
+    expect(withRandom(0.5, () => biasedIndex(100))).toBe(25);      // uniform would give 50
+  });
+
+  test("always returns an integer in [0, n) across the whole random range", () => {
+    for (const r of [0, 0.1, 0.37, 0.5, 0.75, 0.99, 0.999999]) {
+      const i = withRandom(r, () => biasedIndex(40));
+      expect(Number.isInteger(i)).toBe(true);
+      expect(i).toBeGreaterThanOrEqual(0);
+      expect(i).toBeLessThan(40);
+    }
+  });
 });
 
 test.describe("leaksTitle — reject AI hints that give the answer away", () => {

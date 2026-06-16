@@ -105,6 +105,31 @@ test("co-op: a hint revealed by a teammate shows for everyone (no extra fetch)",
   await expect(page.locator('#hintbox .hint-tier[data-tier="summary"] .hint-tier-val')).toBeVisible();
 });
 
+test("co-op: revealing the Synonym tier broadcasts the tier + packet (teammate pays no Groq call)", async ({ page }) => {
+  await fakeTx(page);
+  await routeRest(page);
+  await page.goto("/");
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+  await beReal(page);
+  await loadHP(page);
+  await page.evaluate(() => mp.createRoom("coop"));
+
+  // we hold an AI packet with a synonym; reveal that tier
+  await page.evaluate(() => { hints = { category: "", summary: "", synonym: "Gilded ball", first_letter: "" }; mp._sent.length = 0; });
+  await page.click("#hintsBtn");
+  await page.click('.hint-tier[data-tier="synonym"] .hint-reveal');
+
+  // the synonym tier AND the full packet ride ONE broadcast → a teammate renders it
+  // without a second Groq request (the whole point of sharing the packet verbatim)
+  const hint = await page.evaluate(() => mp._sent.filter(s => s.event === "hint").pop());
+  expect(hint.payload.tier).toBe("synonym");
+  expect(hint.payload.packet.synonym).toBe("Gilded ball");
+
+  // and incoming: a teammate's synonym renders for us too (generic _applyRemoteHint path)
+  await page.evaluate(() => mp._recv("hint", { tier: "synonym", packet: { synonym: "Winged sphere" }, by: "Bob" }));
+  await expect(page.locator('#hintbox .hint-tier[data-tier="synonym"] .hint-tier-val')).toContainText("Winged sphere");
+});
+
 test("co-op: a remote free-word reveal decrements the shared reveal allowance", async ({ page }) => {
   await fakeTx(page);
   await routeRest(page);
@@ -295,6 +320,46 @@ test("versus: opponents' progress updates LIVE via broadcast (not presence — t
   await page.fill("#guess", "golden"); await page.press("#guess", "Enter");
   const prog = await page.evaluate(() => mp._sent.filter(s => s.event === "progress"));
   expect(prog.length).toBeGreaterThan(0);
+});
+
+test("versus: revealing a hint broadcasts our updated score (opponents see the +10 immediately)", async ({ page }) => {
+  await fakeTx(page);
+  await routeRest(page);
+  await page.goto("/");
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+  await beReal(page);
+  await page.evaluate(async ([wiki, rev]) => {
+    await mp.joinRoom("ROOMHINT");
+    await mp._enterRoom({ mode: "versus", wiki, rev, started: true });
+  }, [HP_WIKI, HP_REV]);
+
+  // reveal a hint tier (+10) and check it pushed a fresh progress broadcast — this used
+  // NOT to fire (renderHints didn't publish), so opponents kept our stale score
+  await page.evaluate(() => { mp._sent.length = 0; });
+  await page.click("#hintsBtn");
+  await page.click('.hint-tier[data-tier="summary"] .hint-reveal');
+  const prog = await page.evaluate(() => mp._sent.filter(s => s.event === "progress"));
+  expect(prog.length).toBeGreaterThan(0);
+  expect(prog.some(p => p.payload.score >= 10)).toBe(true);   // the summary tier is reflected in the broadcast score
+});
+
+test("versus: revealing the Synonym tier broadcasts our +30 score", async ({ page }) => {
+  await fakeTx(page);
+  await routeRest(page);
+  await page.goto("/");
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+  await beReal(page);
+  await page.evaluate(async ([wiki, rev]) => {
+    await mp.joinRoom("ROOMSYN");
+    await mp._enterRoom({ mode: "versus", wiki, rev, started: true });
+  }, [HP_WIKI, HP_REV]);
+
+  // reveal the synonym tier (+30) and confirm a fresh progress broadcast carries it
+  await page.evaluate(() => { hints = { category: "", summary: "", synonym: "Gilded ball", first_letter: "" }; mp._sent.length = 0; });
+  await page.click("#hintsBtn");
+  await page.click('.hint-tier[data-tier="synonym"] .hint-reveal');
+  const prog = await page.evaluate(() => mp._sent.filter(s => s.event === "progress"));
+  expect(prog.some(p => p.payload.score >= 30)).toBe(true);   // synonym is the priciest tier
 });
 
 test("a finished co-op game is logged to plays with game_type 'coop'", async ({ page }) => {
