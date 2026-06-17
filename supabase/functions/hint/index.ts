@@ -155,22 +155,29 @@ async function generate(title: string, text: string, categories: string[] = []):
     + "array MUST contain EXACTLY one entry per title word, in the SAME left-to-right order (a 3-word "
     + "title -> a length-3 array). Count the words carefully. For each word give a close 1-3 word "
     + "synonym or paraphrase of THAT word, as literal as the GOLDEN RULE allows. TRY HARD TO FILL "
-    + "EVERY ENTRY — including PROPER NAMES: if a name is descriptive or built from meaningful parts, "
-    + "DECODE its MEANING into DIFFERENT words rather than leaving it blank. This does NOT break the "
-    + "Golden Rule — you're writing the sense, not the name. E.g. \"Triwizard\" -> \"three magician\" "
-    + "(tri = three, wizard = magician); \"Blackwater\" -> \"dark river\"; \"Stormwind\" -> \"tempest "
-    + "gust\". Use an EMPTY STRING \"\" ONLY as a last resort: a truly opaque/arbitrary name with no "
-    + "decodable meaning (e.g. \"Verkal\", \"Excalibur\") or a pure function word (the, of, a, an, "
-    + "and, in, to, ...). Don't reuse the title word's own letters/fragments — paraphrase its sense "
-    + "with different words; and keep the GOLDEN RULE (no title word appears inside any synonym).\n\n"
+    + "EVERY ENTRY. For a COMMON word, give a close, strong synonym (Hold -> fortress, Tournament -> "
+    + "contest). For a PROPER NAME, give only a WEAK, oblique link, and build it ONLY from real "
+    + "words/morphemes VISIBLE IN THE NAME'S OWN SPELLING — split the name into parts that are real "
+    + "words and hint at those. E.g. \"Triwizard\" -> \"three magician\" (tri + wizard); \"Blackwater\" "
+    + "-> \"dark river\" (black + water); \"Stormwind\" -> \"tempest gust\" (storm + wind). "
+    + "CRUCIAL: do NOT translate a name by what the ARTICLE says it MEANS or is famous for — that "
+    + "gives the answer away. E.g. for an invented name like \"Gulan\" do NOT answer \"gold\"/"
+    + "\"golden\" just because the article describes a golden city — \"Gulan\" has no real-word parts "
+    + "in its spelling, so it gets \"\". Use an EMPTY STRING \"\" for: a name with no real-word parts "
+    + "in its own spelling (and no decent weak link), or a pure function word (the, of, a, an, and, "
+    + "in, to, ...). Don't reuse the title word's own letters; keep the GOLDEN RULE (no title word "
+    + "appears inside any synonym).\n\n"
 
     + "Worked examples (title -> synonyms):\n"
-    + "  \"Triwizard Tournament\" -> [\"three magician\", \"contest\"]   (DECODE the name: tri=three, "
-    + "wizard=magician; Tournament -> contest)\n"
+    + "  \"Triwizard Tournament\" -> [\"three magician\", \"contest\"]   (name split by SPELLING: "
+    + "tri+wizard; Tournament -> contest)\n"
+    + "  \"Blackwater\" -> [\"dark river\"]   (one name fully decoded from its spelling: black+water "
+    + "-> dark river)\n"
     + "  \"Black Hole\" -> [\"dark\", \"void\"]   (both common words)\n"
     + "  \"Hold of Verkal Gulan\" -> [\"fortress\", \"\", \"\", \"\"]   (Hold -> fortress, NOT "
-    + "\"stronghold\" which contains \"hold\"; of = function word; Verkal, Gulan = opaque names -> \"\")\n"
-    + "  \"Excalibur\" -> [\"\"]   (a single opaque name with no decodable meaning)\n\n"
+    + "\"stronghold\"; of = function word; Verkal & Gulan = invented names with no real-word parts in "
+    + "their spelling -> \"\"  — do NOT use \"gold\"/\"golden\" from the article's gold theme)\n"
+    + "  \"Excalibur\" -> [\"\"]   (an invented name, no real-word parts -> \"\")\n\n"
 
     + "Output ONLY the JSON object.";
   const user = `Title (the answer — never mention it or its words): "${title}"\n\n`
@@ -196,9 +203,11 @@ async function generate(title: string, text: string, categories: string[] = []):
           // Gemini 2.5 Flash is a THINKING model — it spends output tokens on internal reasoning
           // BEFORE the JSON, and the synonym tier now asks it to creatively DECODE names (more
           // thinking). A tight cap (the old 320) starved the answer and returned EMPTY, so give it
-          // plenty: 4096 leaves ample room to think + emit the small JSON. Free on Gemini (1M TPM);
-          // Groq (no thinking) only ever emits ~50 completion tokens regardless, so harmless there.
-          max_tokens: 4096, temperature: 0.7,   // category + summary + per-word synonyms; first_letter is computed here
+          // plenty: 8192 leaves ample room to think (the name-decoding rules need careful
+          // reasoning) + emit the small JSON. It's only a CEILING — the model stops when done, so
+          // this doesn't force longer thinking. Free on Gemini (1M TPM); Groq (no thinking) only
+          // ever emits ~50 completion tokens regardless, so harmless there.
+          max_tokens: 8192, temperature: 0.7,   // category + summary + per-word synonyms; first_letter is computed here
           response_format: { type: "json_object" },
         }),
         // bound a slow/hung provider so we can fall through (and the daily path can release
