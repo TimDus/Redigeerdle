@@ -1297,16 +1297,7 @@ function tierContent(key) {
   if (key === "summary") return hints.summary || "(no summary for this puzzle)";
   if (key === "first_sentence") return firstSentenceText();
   if (key === "first_letter") return "Title: " + lettersHint();
-  if (key === "synonym") {
-    // current per-word packet: one synonym per title word, in order. Show them as a
-    // positional list (left→right maps to the redacted word-boxes); "" = a proper name.
-    // We deliberately never print the title words themselves — only their synonyms.
-    const arr = hints.synonyms;
-    if (Array.isArray(arr) && arr.length)
-      return "Word by word: " + arr.map(s => s ? s : "(a name)").join(" · ");
-    // legacy single combined synonym (dailies cached before the per-word change)
-    return hints.synonym ? "In other words: “" + hints.synonym + "”." : "(no synonym for this puzzle)";
-  }
+  // synonym is rendered as DOM (buildSynonymValue) so "Name" can be italic; see renderHints.
   if (key === "source") return "Source: " + labelForHost((META.source || {}).wiki || "an unknown wiki");
   return "";
 }
@@ -1333,6 +1324,32 @@ function tierValueSpan(key) {
   const v = document.createElement("span");
   v.className = "hint-tier-val";
   v.textContent = tierContent(key);
+  return v;
+}
+// The Synonym tier (strongest hint): reconstruct the TITLE's shape with each word replaced by
+// its synonym, e.g. "Hold of Verkal Gulan" → "Keep of Name Name", "Triwizard Tournament" →
+// "three magician contest". A content word shows its synonym; a function/stop word stays literal
+// (it's already revealed in the title anyway); an undecoded name (empty synonym, non-stop word)
+// renders as an italic "Name". Index-aligned to the per-word `synonyms` array; falls back to the
+// legacy combined string, then a placeholder. Built as DOM (not textContent) for the italics.
+function buildSynonymValue() {
+  const v = document.createElement("span");
+  v.className = "hint-tier-val";
+  const arr = hints.synonyms;
+  if (Array.isArray(arr) && arr.length) {
+    let j = 0;
+    (titleToks || []).forEach(t => {
+      if (t.sep !== undefined) { v.appendChild(document.createTextNode(t.sep)); return; }
+      const syn = String(arr[j] || "").trim();
+      j++;
+      if (syn) v.appendChild(document.createTextNode(syn));
+      else if (t.stop) v.appendChild(document.createTextNode(t.word));   // function word — already shown in the title
+      else { const i = document.createElement("i"); i.textContent = "Name"; v.appendChild(i); }   // undecoded name
+    });
+    return v;
+  }
+  // legacy single combined synonym (dailies cached before the per-word change), else placeholder
+  v.textContent = hints.synonym ? "In other words: “" + hints.synonym + "”." : "(no synonym for this puzzle)";
   return v;
 }
 
@@ -1396,7 +1413,9 @@ function renderHints() {
 
     const shown = (t.key === "source") ? fandomUsed : hintTiers.includes(t.key);
     if (shown) {
-      row.appendChild(tierValueSpan(t.key));
+      // synonym tier reconstructs the title shape (with an italic "Name" per undecoded name),
+      // so it needs real DOM nodes — the other tiers are plain text.
+      row.appendChild(t.key === "synonym" ? buildSynonymValue() : tierValueSpan(t.key));
     } else if (hintLoading === t.key) {
       const n = document.createElement("span");
       n.className = "hint-note";

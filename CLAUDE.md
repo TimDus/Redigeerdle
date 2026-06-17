@@ -65,15 +65,18 @@ a standalone Node script run by GitHub Actions.
   matching; the server still computes the field, harmlessly.) The model is given the
   article's **first sentence** (the start of the excerpt) and bases the **`summary`** on it
   (generalised, no proper nouns). **`synonyms` is a PER-WORD array** — one close 1-3 word
-  synonym per title word, **in title order** — the most revealing AI tier (costs **+50**, see
-  **Score**). Using the first sentence, the model judges each word: a **proper name** (person,
-  character, place, org) or a function word (the/of/a/…) gets an **empty string `""`** (names
-  have no synonym), e.g. *"Bob's Diary"* → `["", "journal"]`. Each entry goes through the
-  per-field leak filter independently (blank only the leaking entry), so a synonym can be
-  close in meaning yet never literally contains a title word. **The client shows the array
-  positionally** (`tierContent("synonym")`: `"Word by word: glittering · (a name)"`, left→right
-  mapping to the redacted word-boxes) and **never prints the title words themselves** — empty
-  entries render as `"(a name)"`. The JSON string is
+  synonym per title word, **in title order** — the **strongest** AI tier (costs **+50**, see
+  **Score**). A common word gets a close synonym (*Hold → "fortress"*); a **proper name** is
+  decoded **only from real-word parts in its OWN spelling** (*Triwizard → "three magician"*,
+  *Blackwater → "dark river"*), NEVER from what the article says it means (so *Gulan ↛ "gold"* even
+  though Anbennar lore translates it that way — too close); a name with no real-word parts and any
+  function word get an **empty string `""`**. Each entry goes through the per-field leak filter
+  independently (blank only the leaking entry; it also bars a synonym that embeds a title word as a
+  substring, e.g. "stronghold" for "Hold"), so a synonym can be close yet never contains the answer.
+  **The client renders it as the TITLE's SHAPE** (`buildSynonymValue()`): each word replaced by its
+  synonym, function/stop words left literal (already revealed in the title), and an undecoded name
+  shown as an **italic "Name"** — e.g. *"Hold of Verkal Gulan"* → *keep of Name Name*; *"Triwizard
+  Tournament"* → *three magician contest*. It **never prints a hidden title word**. The JSON string is
   stored verbatim in **`puzzles.summary`** (still a `text` column — no migration) and
   parsed client-side (`parseHintPacket`, which also copes with **legacy plain-sentence**
   summaries — the [puzzle.json](puzzle.json) fallback — by treating the whole string as the

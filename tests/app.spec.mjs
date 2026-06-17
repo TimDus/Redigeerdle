@@ -216,16 +216,16 @@ test("synonym tier: reveals the AI synonym, costs +50, and shows in the share", 
   expect(share).toContain("🔁 synonym");
 });
 
-test("synonym tier: per-word synonyms render positionally, names shown as '(a name)'", async ({ page }) => {
-  // current packet shape: one synonym per title word, in order; "" = a proper name
+test("synonym tier: reconstructs the title — synonyms substituted, undecoded names shown as italic 'Name'", async ({ page }) => {
+  // title is "Golden Snitch"; Golden -> "glittering", Snitch -> "" (a name) → "glittering Name"
   await page.evaluate(() => { hints = { category: "", summary: "", synonyms: ["glittering", ""], first_letter: "" }; });
   await page.click("#hintsBtn");
-  const row = page.locator('.hint-tier[data-tier="synonym"]');
-  await row.locator(".hint-reveal").click();
-  // the synonym for word 1 shows; the name word (empty entry) renders as a marker, NOT a title word
-  await expect(row.locator(".hint-tier-val")).toContainText("glittering");
-  await expect(row.locator(".hint-tier-val")).toContainText("(a name)");
-  await expect(row.locator(".hint-tier-val")).not.toContainText("Snitch");
+  const val = page.locator('.hint-tier[data-tier="synonym"] .hint-tier-val');
+  await page.locator('.hint-tier[data-tier="synonym"] .hint-reveal').click();
+  await expect(val).toContainText("glittering");          // content word → its synonym
+  await expect(val.locator("i")).toHaveText("Name");      // undecoded name → italic placeholder
+  await expect(val).not.toContainText("Snitch");          // never the real title word
+  expect((await val.textContent()).trim()).toBe("glittering Name");
 });
 
 test("a chosen-fandom source is shown but FREE — it isn't scored or listed as a used hint", async ({ page }) => {
