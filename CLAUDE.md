@@ -45,7 +45,9 @@ a standalone Node script run by GitHub Actions.
   key alone works. Gemini's free tier is request-bound (no daily-token cap, ~1M TPM) which
   is why it's primary; Groq's free tier is the tighter 12K TPM / 100K TPD (so it was the
   binding constraint before — see the limits discussion). The article excerpt is capped at
-  1500 chars. The
+  **`HINT_EXCERPT_CHARS` = 6000 chars** (client; re-capped server-side to `EXCERPT_CHARS`) —
+  bumped from 1500 once Gemini became primary, since more context yields better
+  category/summary/synonym fits and Gemini's 1M TPM makes the size free. The
   model writes `category` + `summary` + `synonyms` (`response_format: json_object`);
   **`category` is grounded in the page's wiki categories** — the client sends the article's
   visible categories (the Fandom "in:" bar, fetched inline via `prop=text|revid|categories`,

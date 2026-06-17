@@ -39,6 +39,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const GROQ_MODEL = Deno.env.get("GROQ_MODEL") || "llama-3.3-70b-versatile";
 const STALE_MS = 30_000;   // a claim older than this is considered abandoned
+const EXCERPT_CHARS = 6000; // server-side cap on the article excerpt (matches the client; bounds prompt size + caller bloat)
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -144,7 +145,7 @@ async function generate(title: string, text: string, categories: string[] = []):
     + "literally contain a title word. Output ONLY the JSON object, nothing else.";
   const user = `Title (the answer — never mention it or its words): "${title}"\n\n`
     + (cats.length ? `Wiki categories for this page (base "category" on these): ${cats.join(", ")}\n\n` : "")
-    + `Article first sentence(s) / excerpt:\n${String(text).slice(0, 1500)}\n\nReturn the JSON object.`;
+    + `Article first sentence(s) / excerpt:\n${String(text).slice(0, EXCERPT_CHARS)}\n\nReturn the JSON object.`;
   // leak filter + cleaner are title-dependent only (provider-independent) — build once.
   // Folds diacritics + matches Unicode letters/numbers so an accented/non-Latin title
   // (Pokémon, Cyrillic, CJK) is actually guarded, not a silent no-op.
@@ -162,7 +163,12 @@ async function generate(title: string, text: string, categories: string[] = []):
         body: JSON.stringify({
           model: p.model(),
           messages: [{ role: "system", content: sys }, { role: "user", content: user }],
-          max_tokens: 320, temperature: 0.7,   // category + summary + a per-word synonyms array; first_letter is computed here
+          // Gemini 2.5 Flash is a THINKING model — it spends output tokens on internal
+          // reasoning BEFORE the JSON. With the enriched ~6K-char excerpt that's ~750 tokens,
+          // so a tight cap (the old 320) starved the answer and returned EMPTY. 2048 leaves
+          // ample room for thinking + the small JSON. Free on Gemini (1M TPM); Groq (no
+          // thinking) only ever emits ~50 completion tokens regardless, so it's harmless there.
+          max_tokens: 2048, temperature: 0.7,   // category + summary + per-word synonyms; first_letter is computed here
           response_format: { type: "json_object" },
         }),
         // bound a slow/hung provider so we can fall through (and the daily path can release

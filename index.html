@@ -1630,7 +1630,7 @@ async function loadArticle(apiBase, wikiLabel, parseParams, opts = {}) {
   setStatus("Loading article…");
   // starting a fresh solo game while in a room (and not loading INTO one) → leave it
   if (mp.active && !mp._loading && !pendingMpMode) mp.leaveRoom();
-  const parsed = await apiGet(apiBase, { action: "parse", prop: "text|revid", redirects: "1", formatversion: "2", ...parseParams });
+  const parsed = await apiGet(apiBase, { action: "parse", prop: "text|revid|categories", redirects: "1", formatversion: "2", ...parseParams });
   const realTitle = parsed.parse.title;
   if (opts.requireCleanTitle && badTitle(realTitle)) throw new Error("skip: unsuitable title");
   const revid = parsed.parse.revid;
@@ -1651,6 +1651,10 @@ async function loadArticle(apiBase, wikiLabel, parseParams, opts = {}) {
   } catch { /* license not critical */ }
   const base = apiBase.replace(/\/api\.php$/, "");
   articleText = blocks.map(b => b.text).join("\n\n");   // kept for lazy hint generation
+  // the page's visible wiki categories (the "in:" bar) — sent to the hint fn so Groq can
+  // base the Category tier on them. formatversion=2 → {sortkey, category, hidden?}; drop hidden
+  // (maintenance) cats. (No extra request — they ride the action=parse call above.)
+  articleCategories = (parsed.parse.categories || []).filter(c => !c.hidden).map(c => c.category).filter(Boolean);
   initGame(realTitle, blocks, {
     source: { wiki: wikiLabel, revision_id: revid,
       url: base + "/wiki/" + encodeURIComponent(realTitle.replace(/ /g, "_")),
@@ -1704,8 +1708,8 @@ async function loadArticle(apiBase, wikiLabel, parseParams, opts = {}) {
 async function fetchAndApplyHint(title, blocks) {
   if (!supa) return;
   try {
-    const text = blocks.map(b => b.text).join("\n\n").slice(0, 1500);
-    const { data, error } = await supa.functions.invoke("hint", { body: { title, text } });
+    const text = blocks.map(b => b.text).join("\n\n").slice(0, HINT_EXCERPT_CHARS);
+    const { data, error } = await supa.functions.invoke("hint", { body: { title, text, categories: articleCategories } });
     if (error || !data || !data.summary || solved) return;
     hints = parseHintPacket(data.summary) || hints;
     // if the panel is already open, repaint so the now-available tiers offer Reveal
@@ -1723,7 +1727,7 @@ async function requestDailyHint() {
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
       const { data, error } = await supa.functions.invoke("hint",
-        { body: { title: META.title, text: articleText.slice(0, 1500), puzzleId: dailyPuzzleId } });
+        { body: { title: META.title, text: articleText.slice(0, HINT_EXCERPT_CHARS), categories: articleCategories, puzzleId: dailyPuzzleId } });
       if (error) return null;
       if (data && data.summary) return parseHintPacket(data.summary);
       if (data && data.status === "pending") { await sleep(1500); continue; }
@@ -2533,6 +2537,11 @@ let dailyDate = null;       // date of the loaded daily, used for scores/leaderb
 let dailyPuzzleId = null;   // puzzles.id of the loaded daily — the hint cache key + state key
 let dailyFeatured = false;  // is the loaded daily the home-page "featured" one? (only those are scored)
 let articleText = "";       // plain body text of the loaded article, for lazy hints
+let articleCategories = [];  // the loaded page's visible wiki categories (the "in:" bar) — Groq bases the Category hint on these
+// how much article prose to send the hint LLM. Bumped from 1500 once Gemini became primary
+// (1M TPM / no daily-token cap) — more context → better category/summary/synonym fits. The
+// Edge function re-caps to the same bound server-side. (Groq fallback's 12K TPM still fits.)
+const HINT_EXCERPT_CHARS = 6000;
 
 // load a daily puzzle from a pointer record (live fetch of the pinned revision).
 // revealFandom: the player picked this specific fandom (a feed follow-card), so the

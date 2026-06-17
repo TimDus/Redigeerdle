@@ -417,6 +417,8 @@ test("daily lazily fetches a hint via the Edge Function when none is stored", as
   await expect(page.locator("#hintbox")).toContainText("A vague clue about a sport.");
   // the client sent the cache key so the function can store it once for everyone
   expect(hintBody.puzzleId).toBe("2026-06-10");
+  // …and the page's wiki categories (the "in:" bar), so Groq can ground the Category tier
+  expect(Array.isArray(hintBody.categories)).toBe(true);
 });
 
 test("daily polls while the hint is pending, then shows it once ready", async ({ page }) => {
