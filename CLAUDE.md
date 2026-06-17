@@ -33,12 +33,28 @@ a standalone Node script run by GitHub Actions.
 - **The anon Supabase key is safe in client code**; RLS is what protects data. The
   `service_role` key is server-only (GitHub Actions secret / local `.env`) — never ship
   it to the browser.
-- **Hints are a layered packet, generated lazily (once) and cached.** A single Groq
+- **Hints are a layered packet, generated lazily (once) and cached.** A single LLM
   call returns **all hint tiers at once** as a JSON object — `{category, summary,
   synonyms, first_letter}` — so revealing tiers never costs extra API calls (important
-  against Groq's per-minute request limit; the whole call is ~1K tokens — well under the
-  free tier's 12K TPM / 30 RPM, and the article excerpt is capped at 1500 chars). The
+  against the free per-minute limits; the whole call is ~1K tokens). **Provider order:
+  Gemini (Google AI Studio) first, Groq as fallback** — both via their OpenAI-compatible
+  `chat/completions` API, so only the endpoint/key/model differ (`LLM_PROVIDERS` +
+  `generate()` in [supabase/functions/hint/index.ts](supabase/functions/hint/index.ts)). A
+  provider is **skipped** when its key (`GEMINI_API_KEY` / `GROQ_API_KEY`) is unset and
+  **fallen through** on any error/timeout/non-200 or an unusable (all-blank) result; either
+  key alone works. Gemini's free tier is request-bound (no daily-token cap, ~1M TPM) which
+  is why it's primary; Groq's free tier is the tighter 12K TPM / 100K TPD (so it was the
+  binding constraint before — see the limits discussion). The article excerpt is capped at
+  1500 chars. The
   model writes `category` + `summary` + `synonyms` (`response_format: json_object`);
+  **`category` is grounded in the page's wiki categories** — the client sends the article's
+  visible categories (the Fandom "in:" bar, fetched inline via `prop=text|revid|categories`,
+  hidden/maintenance cats dropped) in the request `categories` field, and the prompt tells Groq
+  to base `category` on them (generalise the kind-of-subject ones, ignore proper-noun/setting
+  names and anything resembling the title); with no categories it infers from the article as
+  before. Categories are caller-supplied (capped 12×60 chars server-side) — like `text` they can
+  mislead the hint but never leak the answer, since the output still runs the per-field leak
+  filter against the server-derived real title.
   **`first_letter` is computed server-side** from the authoritative title (never trusted
   to the model), and is the one tier the per-field leak filter skips. (The server's
   `firstLetterOf` matches a Unicode letter/number so an accented/non-Latin title reports
@@ -63,8 +79,8 @@ a standalone Node script run by GitHub Actions.
   string** (dailies cached before the per-word change): the client falls back to rendering that
   string, or shows a placeholder when both synonym fields are empty; freshly-generated
   dailies and all random/custom games include the per-word `synonyms`). The first player to
-  reveal an AI tier triggers the `hint` Edge Function, which generates via Groq and
-  writes the result back to `puzzles.summary`. Concurrent first-clickers are de-duped by
+  reveal an AI tier triggers the `hint` Edge Function, which generates via the LLM
+  (Gemini→Groq, above) and writes the result back to `puzzles.summary`. Concurrent first-clickers are de-duped by
   an **atomic claim** on `puzzles.summary_generating_at` (`UPDATE … WHERE summary IS NULL
   AND the claim is free/stale`); the loser gets `status:"pending"` and the client polls.
   Random/custom games call the same function with no `puzzleId` → generate, no cache.
@@ -147,11 +163,11 @@ a standalone Node script run by GitHub Actions.
   `wiki`+`revision_id` via MediaWiki (`fetchTitleAtRevision`) and generates from that,
   falling back to the supplied title only if the fetch fails. The function also requires
   a **valid Supabase session** (a silent anonymous guest counts) so it isn't an open,
-  unauthenticated Groq proxy — it's deployed `--no-verify-jwt` and checks the JWT in code.
+  unauthenticated LLM proxy — it's deployed `--no-verify-jwt` and checks the JWT in code.
   The auth gate **fails closed**: if there's no service-role key to validate the JWT *with*
   (stripped/misconfigured deploy), it refuses to generate rather than becoming an open
   proxy. (Per-user rate-limiting is still a deploy-level concern — Supabase's anon-signin
-  limit + a Groq dashboard cap.) Both the Groq and MediaWiki fetches use an
+  limit + the provider dashboard caps.) Both the LLM and MediaWiki fetches use an
   `AbortSignal.timeout`, and the daily generate-path **releases its claim**
   (`summary_generating_at`) on any failure — so a slow/hung/failed generation can't strand
   the row in `pending` for the whole 30s stale window.
@@ -439,7 +455,8 @@ signed-in browser windows after deploy, and confirm Realtime is enabled in the S
   tests; the CLI body runs only when executed directly (`isMain` guard). Run:
   `node scripts/pick-daily.mjs --dry-run` (also `--date=`, `--force`).
 - [supabase/functions/hint/index.ts](supabase/functions/hint/index.ts) — Deno Edge
-  Function that generates a spoiler-free hint via Groq (keeps the Groq key server-side).
+  Function that generates a spoiler-free hint via an LLM — **Gemini first, Groq fallback**
+  (`LLM_PROVIDERS`/`generate()`), keeping the API keys server-side.
 - [supabase/functions/merge-anon/index.ts](supabase/functions/merge-anon/index.ts) — Deno
   Edge Function that re-parents an anonymous guest's `plays` onto a real account on
   sign-in (see "Anonymous guests & account merge").

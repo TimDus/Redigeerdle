@@ -3,8 +3,10 @@
 // doesn't know it, so we skip type-checking here. See the Deno-extension note below
 // for full IntelliSense instead.
 // Supabase Edge Function: "hint"
-// Generates a vague, spoiler-free hint for a Redigeerdle puzzle via Groq,
-// keeping the Groq API key server-side (never in the browser).
+// Generates a vague, spoiler-free hint for a Redigeerdle puzzle via an LLM, keeping the API
+// key server-side (never in the browser). Providers are tried IN ORDER: Gemini (Google AI
+// Studio) first, Groq as fallback — both via their OpenAI-compatible chat/completions API,
+// so only the endpoint/key/model differ (see LLM_PROVIDERS / generate()).
 //
 // Two modes:
 //  - WITHOUT puzzleId (random/custom games): generate a hint, return it, no cache.
@@ -16,11 +18,14 @@
 //    30-second staleness window lets a crashed generation be retried.
 //
 // Deploy:  supabase functions deploy hint --no-verify-jwt
-//          supabase secrets set GROQ_API_KEY=gsk_...   (and optionally GROQ_MODEL)
-//   SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are injected automatically.
-// See SUPABASE_SETUP.md.
+//          supabase secrets set GEMINI_API_KEY=...      (primary; optionally GEMINI_MODEL)
+//          supabase secrets set GROQ_API_KEY=gsk_...     (fallback; optionally GROQ_MODEL)
+//   Either key alone works — the other provider is just skipped. SUPABASE_URL and
+//   SUPABASE_SERVICE_ROLE_KEY are injected automatically. See SUPABASE_SETUP.md.
 //
-// Request  (POST):  { "title": "<answer>", "text": "<excerpt>", "puzzleId"?: "<id>" }
+// Request  (POST):  { "title": "<answer>", "text": "<excerpt>", "categories"?: ["<wiki category>", …], "puzzleId"?: "<id>" }
+//   `categories` are the page's visible wiki categories (the "in:" bar) — Groq bases the
+//   `category` tier on them when present (else it infers from the article).
 // Response (JSON):  { "summary": "<packet or empty>", "status": "ready" | "pending" }
 //   `summary` carries a JSON STRING of the layered hint packet
 //   {"category","summary","synonyms","first_letter"} (or "" when no usable hint), where
@@ -93,24 +98,38 @@ function foldText(s: string): string {
   return String(s).normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase();
 }
 
-// Ask Groq — in ONE call — for the layered hint packet {category, summary, synonyms,
-// first_letter}. The model writes `category` + `summary` + `synonyms` (a PER-WORD array)
-// as JSON; `first_letter` is computed here. Keeping it ONE batched call (not one per tier)
-// is what respects Groq's per-minute request limit — see CLAUDE.md. ~1K tokens/call, well
-// under the free tier's 12K TPM / 30 RPM. Returns a JSON STRING of the packet, or "" on any
-// failure / when no tier is usable. The model is given the article's first sentence (the
-// start of the excerpt) so it can both base the summary on it AND judge, per title word,
-// whether the word is a proper name (→ no synonym).
-// The per-field leak filter is kept in sync with leaksTitle in
+// Ask an LLM — in ONE call — for the layered hint packet {category, summary, synonyms,
+// first_letter}. Tries providers IN ORDER: Gemini (Google AI Studio) first, Groq as fallback.
+// Both speak the OpenAI chat/completions shape, so only the endpoint/key/model differ; a
+// provider is SKIPPED when its key is unset and FALLEN THROUGH on any error/timeout/non-200
+// or an unusable (all-blank) result. The model writes `category` + `summary` + `synonyms` (a
+// PER-WORD array) as JSON; `first_letter` is computed here. ONE batched call (not one per
+// tier) keeps us well under the free per-minute limits — see CLAUDE.md. The model gets the
+// article's first sentence so it bases the summary on it AND judges, per title word, whether
+// the word is a proper name (→ no synonym). The per-field leak filter mirrors leaksTitle in
 // scripts/lib/leak-filter.mjs (the unit-tested reference).
-async function generate(title: string, text: string): Promise<string> {
-  const key = Deno.env.get("GROQ_API_KEY");
-  if (!key) return "";
+const LLM_PROVIDERS = [
+  { name: "gemini", url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    keyEnv: "GEMINI_API_KEY", model: () => Deno.env.get("GEMINI_MODEL") || "gemini-2.5-flash" },
+  { name: "groq", url: "https://api.groq.com/openai/v1/chat/completions",
+    keyEnv: "GROQ_API_KEY", model: () => GROQ_MODEL },
+];
+
+async function generate(title: string, text: string, categories: string[] = []): Promise<string> {
+  // the page's wiki categories (the "in:" bar), caller-supplied — cap count/length so a
+  // poisoned/huge list can't bloat the prompt. They GROUND the `category` tier; the output
+  // still goes through the leak filter against the (server-derived) real title, so a bad
+  // category list can mislead the hint but never leak the answer.
+  const cats = (Array.isArray(categories) ? categories : [])
+    .filter((c) => typeof c === "string" && c.trim()).map((c) => c.trim().slice(0, 60)).slice(0, 12);
   const sys = "You write layered, spoiler-controlled hints for a word-guessing game where the player "
     + "must guess an article title. You are given the title and the article's first sentence(s). "
     + "Return ONLY a JSON object with exactly these keys:\n"
     + "  \"category\": 3-6 words naming the general KIND of subject (e.g. 'A fictional character', "
-    + "'A historical battle', 'A type of food'). No proper nouns.\n"
+    + "'A historical battle', 'A type of food'). No proper nouns. When the user message lists the "
+    + "page's WIKI CATEGORIES, base `category` on them — keep the ones naming the general KIND of "
+    + "subject and generalise them; IGNORE proper-noun/setting names and any resembling the title. "
+    + "Otherwise infer it from the article.\n"
     + "  \"summary\": one vague sentence, max 18 words, describing the subject in general terms — "
     + "base it on the article's FIRST SENTENCE and the title, generalised (no proper nouns).\n"
     + "  \"synonyms\": a JSON ARRAY with EXACTLY one entry per word in the title, IN THE SAME ORDER. "
@@ -124,56 +143,58 @@ async function generate(title: string, text: string): Promise<string> {
     + "`synonyms` entry should be as literal and close in meaning as possible but must still not "
     + "literally contain a title word. Output ONLY the JSON object, nothing else.";
   const user = `Title (the answer — never mention it or its words): "${title}"\n\n`
+    + (cats.length ? `Wiki categories for this page (base "category" on these): ${cats.join(", ")}\n\n` : "")
     + `Article first sentence(s) / excerpt:\n${String(text).slice(0, 1500)}\n\nReturn the JSON object.`;
-  try {
-    const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: { Authorization: "Bearer " + key, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: GROQ_MODEL,
-        messages: [{ role: "system", content: sys }, { role: "user", content: user }],
-        max_tokens: 320, temperature: 0.7,   // category + summary + a per-word synonyms array; first_letter is computed here
-        response_format: { type: "json_object" },
-      }),
-      // bound a slow/hung Groq so we don't hold the daily's generation claim (and the
-      // request) until the platform wall-clock kill — on timeout this throws, the catch
-      // returns "", and the daily path then releases the claim for a later retry.
-      signal: AbortSignal.timeout(12000),
-    });
-    if (!r.ok) return "";
-    const j = await r.json();
-    const content = (j.choices?.[0]?.message?.content || "").trim();
-    let parsed: Record<string, unknown> = {};
-    try { parsed = JSON.parse(content); } catch { return ""; }
-    const clean = (s: unknown) => String(s || "").trim().replace(/^["']+|["']+$/g, "").trim();
-    let category = clean(parsed.category);
-    let summary = clean(parsed.summary);
-    // synonyms: a per-word array of strings (the prompt asks for that, with "" for names).
-    // Non-string entries from a drifted model degrade to "" → blanked below. Harmless.
-    const rawSyn = Array.isArray(parsed.synonyms) ? parsed.synonyms : [];
-    let synonyms = rawSyn.map((e: unknown) => clean(typeof e === "string" ? e : ""));
-    // per-field leak filter: blank ONLY a field/entry that contains a significant title word
-    // (keep the rest). Mirrors leaksTitle in scripts/lib/leak-filter.mjs — folds diacritics and
-    // matches Unicode letters/numbers, so an accented/non-Latin title (Pokémon, Cyrillic, CJK)
-    // is actually guarded instead of silently producing 0 words. Each per-word synonym is MEANT
-    // to be close in meaning, but the same filter still bars it from literally containing a
-    // title word/variant (so it stays a synonym, never the answer).
-    const titleWords = foldText(title).match(/[\p{L}\p{N}]{3,}/gu) || [];
-    const leaks = (s: string) => { const low = foldText(s); return titleWords.some((w: string) => low.includes(w)); };
-    if (category.length < 3 || category.length > 80 || leaks(category)) category = "";
-    if (summary.length < 8 || summary.length > 200 || leaks(summary)) summary = "";
-    synonyms = synonyms.map((s: string) => (s.length >= 2 && s.length <= 60 && !leaks(s)) ? s : "");
-    if (!category && !summary && !synonyms.some(Boolean)) return "";   // nothing usable from the model
-    return JSON.stringify({ category, summary, synonyms, first_letter: firstLetterOf(title) });
-  } catch {
-    return "";
+  // leak filter + cleaner are title-dependent only (provider-independent) — build once.
+  // Folds diacritics + matches Unicode letters/numbers so an accented/non-Latin title
+  // (Pokémon, Cyrillic, CJK) is actually guarded, not a silent no-op.
+  const titleWords = foldText(title).match(/[\p{L}\p{N}]{3,}/gu) || [];
+  const leaks = (s: string) => { const low = foldText(s); return titleWords.some((w: string) => low.includes(w)); };
+  const clean = (s: unknown) => String(s || "").trim().replace(/^["']+|["']+$/g, "").trim();
+
+  for (const p of LLM_PROVIDERS) {
+    const key = Deno.env.get(p.keyEnv);
+    if (!key) continue;   // provider not configured → try the next one
+    try {
+      const r = await fetch(p.url, {
+        method: "POST",
+        headers: { Authorization: "Bearer " + key, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: p.model(),
+          messages: [{ role: "system", content: sys }, { role: "user", content: user }],
+          max_tokens: 320, temperature: 0.7,   // category + summary + a per-word synonyms array; first_letter is computed here
+          response_format: { type: "json_object" },
+        }),
+        // bound a slow/hung provider so we can fall through (and the daily path can release
+        // its claim) instead of holding the request until the platform wall-clock kill.
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!r.ok) continue;   // 4xx/5xx/429 → fall back to the next provider
+      const j = await r.json();
+      const content = (j.choices?.[0]?.message?.content || "").trim();
+      let parsed: Record<string, unknown> = {};
+      try { parsed = JSON.parse(content); } catch { continue; }   // non-JSON → next provider
+      let category = clean(parsed.category);
+      let summary = clean(parsed.summary);
+      // synonyms: a per-word array of strings ("" for names). Non-string entries from a
+      // drifted model degrade to "" → blanked below. Harmless.
+      const rawSyn = Array.isArray(parsed.synonyms) ? parsed.synonyms : [];
+      let synonyms = rawSyn.map((e: unknown) => clean(typeof e === "string" ? e : ""));
+      // per-field leak filter: blank ONLY a field/entry containing a significant title word.
+      if (category.length < 3 || category.length > 80 || leaks(category)) category = "";
+      if (summary.length < 8 || summary.length > 200 || leaks(summary)) summary = "";
+      synonyms = synonyms.map((s: string) => (s.length >= 2 && s.length <= 60 && !leaks(s)) ? s : "");
+      if (!category && !summary && !synonyms.some(Boolean)) continue;   // unusable → fall back to the next provider
+      return JSON.stringify({ category, summary, synonyms, first_letter: firstLetterOf(title) });
+    } catch { continue; }   // network error / timeout → next provider
   }
+  return "";   // every configured provider failed / had nothing usable
 }
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   try {
-    const { title, text, puzzleId } = await req.json().catch(() => ({}));
+    const { title, text, categories, puzzleId } = await req.json().catch(() => ({}));
     if (!title || !text) return json({ summary: "", status: "ready" });
 
     const admin = adminClient();
@@ -197,7 +218,7 @@ Deno.serve(async (req) => {
 
     // ---- random/custom games: no row to cache against, just generate ----
     if (!puzzleId) {
-      return json({ summary: await generate(title, text), status: "ready" });
+      return json({ summary: await generate(title, text, categories), status: "ready" });
     }
 
     // ---- daily: generate once and cache, race-safe via an atomic claim ----
@@ -234,7 +255,7 @@ Deno.serve(async (req) => {
       //    "pending" for the whole 30s stale window.
       try {
         const authTitle = await fetchTitleAtRevision(row?.wiki, row?.revision_id);
-        const hint = await generate(authTitle || title, text);
+        const hint = await generate(authTitle || title, text, categories);
         if (hint) {
           await admin.from("puzzles").update({ summary: hint }).eq("id", puzzleId);
           return json({ summary: hint, status: "ready" });
@@ -252,7 +273,7 @@ Deno.serve(async (req) => {
     } catch {
       // DB path unavailable (e.g. migration not applied yet) → degrade gracefully:
       // generate without caching, so the feature still works.
-      return json({ summary: await generate(title, text), status: "ready" });
+      return json({ summary: await generate(title, text, categories), status: "ready" });
     }
   } catch {
     return json({ summary: "", status: "ready" });
