@@ -197,6 +197,9 @@
   .statusbtns { display:flex; gap:8px; flex:0 0 auto; margin-left:auto; }
   .statusbtns button { background:var(--paper); color:var(--ink); padding:7px 12px; font-size:.72rem; }
   .statusbtns button:hover:not(:disabled) { background:var(--ink); color:var(--paper); border-color:var(--ink); }
+  #socialBtn { display:none; }   /* mobile-only: Share + Invite collapse into it (placeSocial) */
+  #socialModalBody { display:flex; flex-direction:column; gap:10px; }
+  #socialModalBody button { display:block; width:100%; }
   #article { grid-area:article; }
   /* the controls column follows you down the page as the (taller) article scrolls —
      pinned directly below the sticky top bar. --header-h is the top bar's full rendered
@@ -231,12 +234,9 @@
       z-index:30;
     }
     #controlcol .tools { order:1; margin:0; flex:0 0 auto; gap:5px; flex-wrap:nowrap; }
-    /* always one row: the buttons share the width equally and their label scales with
-       the viewport (clamp + vw) so nothing wraps down to ~300px. overflow:hidden +
-       ellipsis is a safety net so even a long label (e.g. the static "Reveal a word
-       (3 left)" shown for the split second BEFORE the article finishes loading and
-       updateRevealBtn swaps in the compact "Word (N)") is clipped, never spilling out
-       of the fixed footer. */
+    /* always one row: the buttons (Hints / Give up) share the width equally and their
+       label scales with the viewport (clamp + vw) so nothing wraps down to ~300px;
+       overflow:hidden + ellipsis is a safety net against any label spilling out. */
     #controlcol .tools button {
       flex:1 1 0; min-width:0; white-space:nowrap;
       overflow:hidden; text-overflow:ellipsis;
@@ -254,10 +254,12 @@
     #controlcol .guess-top { display:inline-flex; align-items:center; justify-content:center; flex:0 0 auto; padding:8px 10px; font-size:1rem; line-height:1; }
     #controlcol .meta { display:none; }
     .wrap { padding-bottom:calc(var(--footer-h, 150px) + 12px); }
-    /* the status message is dropped on mobile; only the Share / Daily-metrics
-       buttons stay at the top of the article. */
+    /* the status message is dropped on mobile; only the Social / Daily-metrics
+       buttons stay at the top of the article (Share + Invite are reparented into the
+       #socialmodal popup behind the "Social" button — see placeSocial). */
     .statusbar .status { display:none; }
     .statusbar { margin-bottom:8px; }
+    #socialBtn { display:inline-block; }
     /* the Hints panel (#hintbox) is reparented by JS into the #hintsmodal popup on
        mobile (opened by the footer "Hints" button), so it no longer sits above the
        article. Inside the modal it shows flush (no extra margin) and scrolls with the
@@ -590,6 +592,16 @@
     </div>
   </div>
 
+  <!-- mobile only: the Share + Invite buttons are reparented into this modal body
+       (placeSocial); on desktop they live inline in the status bar instead. -->
+  <div class="modal" id="socialmodal" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-label="Social">
+      <button class="modal-x" id="socialClose" aria-label="Close">&times;</button>
+      <h2 class="modal-title">Social</h2>
+      <div id="socialModalBody"></div>
+    </div>
+  </div>
+
   <div class="modal" id="authmodal" aria-hidden="true">
     <div class="modal-card" role="dialog" aria-modal="true" aria-label="Sign in">
       <button class="modal-x" id="authClose" aria-label="Close">&times;</button>
@@ -621,6 +633,7 @@
       <div class="statusbtns">
         <button id="shareBtn">Share</button>
         <button id="inviteBtn" hidden>Invite (co-op)</button>
+        <button id="socialBtn">Social</button>
         <button id="metricsBtn">Daily metrics</button>
       </div>
     </div>
@@ -632,7 +645,6 @@
         <div class="mp-standings" id="mpStandings"></div>
       </div>
       <div class="tools">
-        <button id="revealBtn" disabled>Reveal a word (3 left)</button>
         <button id="hintsBtn" disabled>Hints</button>
         <button id="giveUpBtn">Give up</button>
       </div>
@@ -725,7 +737,7 @@ let lettersRevealed = 0;
 // the "First sentence" hint tier: whether it's been bought, and how many still-hidden words
 // it uncovered at purchase (the locked per-word cost). Persisted across daily resumes.
 let firstSentenceUsed = false, firstSentenceWords = 0;
-const EMPTY_HINTS = { category: "", summary: "", synonym: "", first_letter: "" };
+const EMPTY_HINTS = { category: "", summary: "", synonym: "", synonyms: [], first_letter: "" };
 // true when the current daily was restored as *already finished* from the server
 // (solved/gave up on another device, or as a now-merged guest) with no local guess
 // list — suppresses recordPlay/submitScore so we never clobber the real server row
@@ -988,7 +1000,7 @@ function attribution(solved) {
 
 // disable play + every hint control once the game is over (win or give up)
 function lockGame() {
-  ["guess", "go", "revealBtn", "hintsBtn", "giveUpBtn"]
+  ["guess", "go", "hintsBtn", "giveUpBtn"]
     .forEach(id => { document.getElementById(id).disabled = true; });
   document.getElementById("body").classList.remove("arming");
   revealArmed = false;
@@ -1105,11 +1117,13 @@ function disarm() {
 }
 
 function toggleArm() {
-  if (hintsLeft <= 0) return;
+  if (hintsLeft <= 0 || solved || gaveUp) return;
   revealArmed = !revealArmed;
   document.getElementById("body").classList.toggle("arming", revealArmed);
-  updateRevealBtn();
-  if (revealArmed) setStatus("Pick a word in the text to reveal — title words are locked.");
+  // arming from the Hints popup on mobile: close it so the article underneath is tappable
+  if (revealArmed && mqMobile.matches) document.getElementById("hintsmodal").classList.remove("open");
+  updateRevealBtn();   // refresh the Reveal-a-word row in the (open) Hints panel
+  setStatus(revealArmed ? "Pick a word in the text to reveal — title words are locked." : "");
 }
 
 function handleBodyClick(e) {
@@ -1127,16 +1141,12 @@ function handleBodyClick(e) {
   setStatus("Word revealed — " + hintsLeft + " reveal(s) left.");
 }
 
+// The Reveal-a-word control now lives INSIDE the Hints panel (renderHints builds its row
+// from hintsLeft / revealArmed / the game-over state). There's no standalone button to
+// update anymore — just re-render the panel when it's open so the row reflects the latest
+// state (arm/cancel, reveals left). No-op when the panel is collapsed.
 function updateRevealBtn() {
-  const b = document.getElementById("revealBtn");
-  // mobile gets the compact label ("Word (3)" / "Cancel") so it fits the footer tools row
-  const mobile = window.matchMedia("(max-width:640px)").matches;
-  if (solved || gaveUp) { b.disabled = true; return; }   // game over — never re-enable
-  if (hintsLeft <= 0) { b.textContent = mobile ? "Word (0)" : "No reveals left"; b.disabled = true; return; }
-  b.disabled = false;
-  b.textContent = revealArmed
-    ? (mobile ? "Cancel" : "Pick a word… (cancel)")
-    : (mobile ? "Word (" + hintsLeft + ")" : "Reveal a word (" + hintsLeft + " left)");
+  if (document.getElementById("hintbox").style.display === "block") renderHints();
 }
 
 /* ---- the layered "Hints" panel ----------------------------------------------
@@ -1266,17 +1276,20 @@ function firstSentenceText() {
 
 // the Edge Function returns the layered packet as a JSON string in `summary`; legacy
 // rows / puzzle.json hold a plain sentence — coerce all of these into
-// {category,summary,synonym,first_letter}. A packet from before the `synonym` tier
-// existed simply has no `synonym` key → it stays "" (the tier shows a placeholder).
+// {category,summary,synonym,synonyms,first_letter}. `synonyms` is the current PER-WORD
+// array (one entry per title word, "" for a name); `synonym` is the legacy single combined
+// string (kept so dailies cached before the per-word change, and a packet with neither
+// synonym field, still render — the tier just shows a placeholder when both are empty).
 function parseHintPacket(raw) {
   if (!raw) return null;
   if (typeof raw === "object") return { ...EMPTY_HINTS, ...raw };
   try {
     const o = JSON.parse(raw);
-    if (o && typeof o === "object" && ("category" in o || "summary" in o || "synonym" in o || "first_letter" in o))
-      return { category: o.category || "", summary: o.summary || "", synonym: o.synonym || "", first_letter: o.first_letter || "" };
+    if (o && typeof o === "object" && ("category" in o || "summary" in o || "synonym" in o || "synonyms" in o || "first_letter" in o))
+      return { category: o.category || "", summary: o.summary || "", synonym: o.synonym || "",
+        synonyms: Array.isArray(o.synonyms) ? o.synonyms : [], first_letter: o.first_letter || "" };
   } catch { /* not JSON — a legacy plain-text summary sentence */ }
-  return { category: "", summary: String(raw), synonym: "", first_letter: "" };
+  return { category: "", summary: String(raw), synonym: "", synonyms: [], first_letter: "" };
 }
 
 function tierContent(key) {
@@ -1284,7 +1297,16 @@ function tierContent(key) {
   if (key === "summary") return hints.summary || "(no summary for this puzzle)";
   if (key === "first_sentence") return firstSentenceText();
   if (key === "first_letter") return "Title: " + lettersHint();
-  if (key === "synonym") return hints.synonym ? "In other words: “" + hints.synonym + "”." : "(no synonym for this puzzle)";
+  if (key === "synonym") {
+    // current per-word packet: one synonym per title word, in order. Show them as a
+    // positional list (left→right maps to the redacted word-boxes); "" = a proper name.
+    // We deliberately never print the title words themselves — only their synonyms.
+    const arr = hints.synonyms;
+    if (Array.isArray(arr) && arr.length)
+      return "Word by word: " + arr.map(s => s ? s : "(a name)").join(" · ");
+    // legacy single combined synonym (dailies cached before the per-word change)
+    return hints.synonym ? "In other words: “" + hints.synonym + "”." : "(no synonym for this puzzle)";
+  }
   if (key === "source") return "Source: " + labelForHost((META.source || {}).wiki || "an unknown wiki");
   return "";
 }
@@ -1320,6 +1342,31 @@ function renderHints() {
   box.style.display = "block";
   updateScore();   // a tier may have just been revealed — keep the live score in sync
   const over = !!(solved || gaveUp);
+
+  // "Reveal a word" — the free-word reveal, now the FIRST row of this panel (it used to be
+  // a toolbar button). Its Reveal button ARMS a mode; the player then clicks a (non-title)
+  // word in the article to reveal it (+5), up to `hintsLeft` (3). On mobile, arming closes
+  // this popup (see toggleArm) so the article underneath is tappable.
+  {
+    const row = document.createElement("div");
+    row.className = "hint-tier"; row.dataset.tier = "reveal_word";
+    const lab = document.createElement("span"); lab.className = "hint-tier-label"; lab.textContent = "Reveal a word";
+    row.appendChild(lab);
+    if (hintsLeft <= 0) {
+      const n = document.createElement("span"); n.className = "hint-tier-val"; n.textContent = "(no reveals left)";
+      row.appendChild(n);
+    } else if (!over) {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "hint-reveal";
+      b.textContent = revealArmed
+        ? "Pick a word… (cancel)"
+        : "Reveal a word (+" + SCORE.reveal + ", " + hintsLeft + " left)";
+      b.addEventListener("click", toggleArm);
+      row.appendChild(b);
+    }
+    box.appendChild(row);
+  }
+
   HINT_TIERS.forEach(t => {
     const row = document.createElement("div");
     row.className = "hint-tier";
@@ -1399,6 +1446,13 @@ function revealNextLetter() {
   lettersRevealed++;
   drawTitle();               // un-redact the next letter in the actual title at the top
   addTier("first_letter");   // marks the tier, bumps summaryUsed, saves, repaints, broadcasts (co-op), publishes (versus)
+  // last letter just lit → the word is fully spelled out, so PROMOTE it to a real guessed
+  // word: it counts toward the solve, shows in the history, and (like a typed guess) reveals
+  // its body occurrences too. The letters were already paid for, so this adds no score (a
+  // correct guess is +0); the guessed-guard keeps it idempotent. In co-op applyGuess
+  // broadcasts the guess, so every teammate's board registers it the same way.
+  if (target.lit >= revealableCount(target.word) && !target.revealed && !guessed.has(target.key))
+    applyGuess(target.key, target.word, false);
 }
 // buy the first-sentence reveal (one-shot): uncover its non-title words and lock the per-word cost.
 function revealFirstSentenceHint() {
@@ -1434,9 +1488,18 @@ async function revealTier(key) {
   addTier(key);
 }
 
+// the "Hints" button TOGGLES the panel: open (render) it if collapsed, collapse it if open.
 function showHints() {
-  renderHints();   // builds into #hintbox (in #controlcol on desktop, in #hintsModalBody on mobile)
-  if (mqMobile.matches) document.getElementById("hintsmodal").classList.add("open");
+  if (mqMobile.matches) {
+    const m = document.getElementById("hintsmodal");
+    if (m.classList.contains("open")) { m.classList.remove("open"); return; }
+    renderHints();   // build into #hintsModalBody, then show the popup
+    m.classList.add("open");
+  } else {
+    const box = document.getElementById("hintbox");
+    if (box.style.display === "block") { box.style.display = "none"; return; }   // collapse
+    renderHints();   // shows the panel (sets display:block)
+  }
 }
 
 function initGame(title, blocks, meta) {
@@ -1653,7 +1716,7 @@ async function fetchAndApplyHint(title, blocks) {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // Lazily fetch (and let the Edge Function cache, once, on the puzzle row) the
-// daily's hint packet. Returns the parsed {category,summary,synonym,first_letter}
+// daily's hint packet. Returns the parsed {category,summary,synonyms,first_letter}
 // object, "" when the puzzle has no usable hint (ready but empty), or null when it's
 // still pending after retries / errored.
 async function requestDailyHint() {
@@ -3236,7 +3299,6 @@ document.getElementById("statsmodal").addEventListener("click", e => {
 document.getElementById("go").addEventListener("click", submitGuess);
 document.getElementById("guess").addEventListener("keydown", e => { if (e.key === "Enter") submitGuess(); });
 document.getElementById("guess").addEventListener("input", updateGuessCount);
-document.getElementById("revealBtn").addEventListener("click", toggleArm);
 document.getElementById("body").addEventListener("click", handleBodyClick);
 // click a guessed word in the history → jump to it in the text (cycles occurrences)
 document.getElementById("history").addEventListener("click", e => {
@@ -3297,6 +3359,12 @@ document.getElementById("hintsClose").addEventListener("click", () => document.g
 document.getElementById("hintsmodal").addEventListener("click", e => {
   if (e.target.id === "hintsmodal") e.currentTarget.classList.remove("open");
 });
+// "Social" (mobile): open the popup holding Share + Invite; ✕ / backdrop / a button-click close it
+document.getElementById("socialBtn").addEventListener("click", () => document.getElementById("socialmodal").classList.add("open"));
+document.getElementById("socialClose").addEventListener("click", () => document.getElementById("socialmodal").classList.remove("open"));
+document.getElementById("socialmodal").addEventListener("click", e => {
+  if (e.target.id === "socialmodal" || e.target.closest("button#shareBtn, button#inviteBtn")) e.currentTarget.classList.remove("open");
+});
 // mobile drawer quick actions: close the drawer, then trigger the same action as the
 // (hidden-on-mobile) header buttons. New game / Settings / How to play.
 document.getElementById("feedNewBtn").addEventListener("click", () => { closeFeed(); openMenu(); });
@@ -3350,6 +3418,7 @@ document.addEventListener("keydown", e => {
   if (document.getElementById("settingsmodal").classList.contains("open")) closeSettings();
   document.getElementById("helpmodal").classList.remove("open");
   document.getElementById("hintsmodal").classList.remove("open");
+  document.getElementById("socialmodal").classList.remove("open");
   document.getElementById("authmodal").classList.remove("open");
   closeMetrics();
   closeStats();
@@ -3412,7 +3481,6 @@ document.getElementById("mpCancelBtn").addEventListener("click", () => mp.cancel
    no gap. We measure the .topbar itself (padding + border included, margin excluded =
    exactly the pinned height) rather than the inner header + a magic offset, so it stays
    correct as the header wraps to two rows on narrow viewports. */
-const headerEl = document.querySelector("header");
 const topbarEl = document.querySelector(".topbar");
 function syncHeaderH() {
   // getBoundingClientRect() is sub-pixel exact (offsetHeight rounds to an integer),
@@ -3456,28 +3524,45 @@ window.addEventListener("scroll", onScrollHeader, { passive: true });
    column on desktop, but on mobile it goes inside the #hintsmodal popup (opened by the
    footer "Hints" button) instead of above the article. CSS `order` can't move it across
    containers, so reparent the node by viewport: mobile → into #hintsModalBody; desktop →
-   back into #controlcol above the guessed-words history. Moving the node keeps any
-   already-rendered content. */
+   back into #controlcol just ABOVE the word guesser (the guessbar). Moving the node keeps
+   any already-rendered content. */
 const hintboxEl = document.getElementById("hintbox");
-const historyEl = document.getElementById("history");
+const guessbarEl = controlColEl.querySelector(".guessbar");
 const hintsModalBodyEl = document.getElementById("hintsModalBody");
 function placeHintbox() {
   if (mqMobile.matches) {
     if (hintboxEl.parentElement !== hintsModalBodyEl) hintsModalBodyEl.appendChild(hintboxEl);
   } else {
     document.getElementById("hintsmodal").classList.remove("open");   // leaving mobile → drop the popup
-    if (historyEl.previousElementSibling !== hintboxEl) controlColEl.insertBefore(hintboxEl, historyEl);
+    if (guessbarEl && guessbarEl.previousElementSibling !== hintboxEl) controlColEl.insertBefore(hintboxEl, guessbarEl);
   }
 }
 placeHintbox();
 
-// pre-load: on mobile, show the compact reveal label immediately so the static full-text
-// default ("Reveal a word (3 left)") never flashes (and overflows the fixed footer) during
-// the async article fetch — updateRevealBtn swaps in the live count once the game loads.
-if (mqMobile.matches) document.getElementById("revealBtn").textContent = "Word (3)";
+/* On mobile, Share + Invite collapse behind one "Social" button that opens the #socialmodal
+   popup; on desktop they stay inline in the status bar. Same reparent trick as placeHintbox:
+   mobile → move both buttons into #socialModalBody; desktop → back into .statusbtns (before
+   "Daily metrics"). updateInviteBtn still toggles the SAME #inviteBtn node either place. */
+const shareBtnEl = document.getElementById("shareBtn");
+const inviteBtnEl = document.getElementById("inviteBtn");
+const socialModalBodyEl = document.getElementById("socialModalBody");
+const statusBtnsEl = document.querySelector(".statusbtns");
+const metricsBtnEl = document.getElementById("metricsBtn");
+function placeSocial() {
+  if (mqMobile.matches) {
+    if (shareBtnEl.parentElement !== socialModalBodyEl) socialModalBodyEl.append(shareBtnEl, inviteBtnEl);
+  } else {
+    document.getElementById("socialmodal").classList.remove("open");   // leaving mobile → drop the popup
+    if (shareBtnEl.parentElement !== statusBtnsEl) {
+      statusBtnsEl.insertBefore(shareBtnEl, metricsBtnEl);
+      statusBtnsEl.insertBefore(inviteBtnEl, metricsBtnEl);
+    }
+  }
+}
+placeSocial();
 
-// react to crossing the mobile breakpoint: re-show the header and re-place the hintbox
-function onMobileMqChange() { topbarEl.classList.remove("topbar--hidden"); placeHintbox(); if (typeof META !== "undefined" && META) updateRevealBtn(); }
+// react to crossing the mobile breakpoint: re-show the header and re-place the hintbox + social buttons
+function onMobileMqChange() { topbarEl.classList.remove("topbar--hidden"); placeHintbox(); placeSocial(); if (typeof META !== "undefined" && META) updateRevealBtn(); }
 if (mqMobile.addEventListener) mqMobile.addEventListener("change", onMobileMqChange);
 else mqMobile.addListener(onMobileMqChange);
 

@@ -35,47 +35,58 @@ a standalone Node script run by GitHub Actions.
   it to the browser.
 - **Hints are a layered packet, generated lazily (once) and cached.** A single Groq
   call returns **all hint tiers at once** as a JSON object — `{category, summary,
-  synonym, first_letter}` — so revealing tiers never costs extra API calls (important
-  against Groq's per-minute request limit; the whole call is ~910 tokens — well under the
+  synonyms, first_letter}` — so revealing tiers never costs extra API calls (important
+  against Groq's per-minute request limit; the whole call is ~1K tokens — well under the
   free tier's 12K TPM / 30 RPM, and the article excerpt is capped at 1500 chars). The
-  model writes `category` + `summary` + `synonym` (`response_format: json_object`);
+  model writes `category` + `summary` + `synonyms` (`response_format: json_object`);
   **`first_letter` is computed server-side** from the authoritative title (never trusted
   to the model), and is the one tier the per-field leak filter skips. (The server's
   `firstLetterOf` matches a Unicode letter/number so an accented/non-Latin title reports
   its real first character. The packet's `first_letter` field is now **unused client-side**
   — the client's **Letters** tier derives letters locally via `lettersHint`, same Unicode
-  matching; the server still computes the field, harmlessly.) **`synonym`** is a tight,
-  deliberately-literal near-equivalent of the title's main word(s) — the most revealing AI
-  tier (costs **+50**, see **Score**). The prompt pushes it as close to the answer's meaning
-  as the leak filter allows, and is **name-aware even for names embedded in a phrase**: it
-  replaces any proper name *part* of the title with a generic word for its kind (a personal
-  name → "a character"/"a person", a place → "a place", an org → "an organisation") and
-  synonymises the remaining common words, combining them naturally — e.g. *"Bob's Diary"* →
-  *"a character's journal"*, while a title that is **only** a name → "a person's name" / "a
-  place name". (Synonymising the common noun isn't just nicer — it's what lets the field
-  survive the leak filter, since the literal title word would be blanked.) It still goes
-  through the per-field leak filter,
-  so it can be close in meaning yet never literally contains a title word. The JSON string is
+  matching; the server still computes the field, harmlessly.) The model is given the
+  article's **first sentence** (the start of the excerpt) and bases the **`summary`** on it
+  (generalised, no proper nouns). **`synonyms` is a PER-WORD array** — one close 1-3 word
+  synonym per title word, **in title order** — the most revealing AI tier (costs **+50**, see
+  **Score**). Using the first sentence, the model judges each word: a **proper name** (person,
+  character, place, org) or a function word (the/of/a/…) gets an **empty string `""`** (names
+  have no synonym), e.g. *"Bob's Diary"* → `["", "journal"]`. Each entry goes through the
+  per-field leak filter independently (blank only the leaking entry), so a synonym can be
+  close in meaning yet never literally contains a title word. **The client shows the array
+  positionally** (`tierContent("synonym")`: `"Word by word: glittering · (a name)"`, left→right
+  mapping to the redacted word-boxes) and **never prints the title words themselves** — empty
+  entries render as `"(a name)"`. The JSON string is
   stored verbatim in **`puzzles.summary`** (still a `text` column — no migration) and
   parsed client-side (`parseHintPacket`, which also copes with **legacy plain-sentence**
-  summaries, the [puzzle.json](puzzle.json) fallback by treating the whole string as the
-  `summary` tier, AND a **pre-`synonym` packet** by leaving `synonym` empty → that tier
-  shows a placeholder on dailies cached before this tier existed; freshly-generated
-  dailies and all random/custom games include it). The first player to
+  summaries — the [puzzle.json](puzzle.json) fallback — by treating the whole string as the
+  `summary` tier, AND a **pre-`synonyms` packet** carrying a single combined **`synonym`
+  string** (dailies cached before the per-word change): the client falls back to rendering that
+  string, or shows a placeholder when both synonym fields are empty; freshly-generated
+  dailies and all random/custom games include the per-word `synonyms`). The first player to
   reveal an AI tier triggers the `hint` Edge Function, which generates via Groq and
   writes the result back to `puzzles.summary`. Concurrent first-clickers are de-duped by
   an **atomic claim** on `puzzles.summary_generating_at` (`UPDATE … WHERE summary IS NULL
   AND the claim is free/stale`); the loser gets `status:"pending"` and the client polls.
   Random/custom games call the same function with no `puzzleId` → generate, no cache.
-  **UI** ([index.html](index.html)): a single **"Hints"** button (`#hintsBtn`, next to
-  "Reveal a word") opens the `#hintbox` panel, rebuilt by **`renderHints()`** — one row
-  per tier, least→most revealing: **Category → Summary → First sentence → Letters →
-  Synonym → Source**. Each tier has its own **Reveal** button (`revealTier(key)`) whose
-  label shows the next purchase cost (`nextRevealCost(key)`). `category`/`summary`/`synonym`
+  **UI** ([index.html](index.html)): a single **"Hints"** button (`#hintsBtn`) **TOGGLES**
+  the `#hintbox` panel (`showHints()` — open/render if collapsed, hide if open; on mobile it
+  opens/closes the `#hintsmodal` popup). The panel is rebuilt by **`renderHints()`** — a
+  **Reveal a word** row first, then one row per tier, least→most revealing: **Reveal a word
+  → Category → Summary → First sentence → Letters → Synonym → Source**. Each tier has its
+  own **Reveal** button (`revealTier(key)`) whose label shows the next purchase cost
+  (`nextRevealCost(key)`). `category`/`summary`/`synonym`
   come from the AI packet (revealed instantly if already fetched, else lazily generated);
   **First sentence** and **Letters** are **derived locally from the article + title** (no
   Groq, no leak filter — see below); **Source** folds in the old `showFandom`
   (`revealSource()` / `fandomUsed`).
+  - **Reveal a word** (`reveal_word`, the free-word reveal) is **no longer a toolbar button**
+    — it's the FIRST row of this panel. Its button calls `toggleArm()` to arm the pick-a-word
+    mode; the player then clicks a non-title body word to reveal it (**+5**, up to `hintsLeft`
+    = 3). On **mobile**, arming closes the Hints popup so the article underneath is tappable.
+    `renderHints()` builds the row live from `hintsLeft`/`revealArmed`/game-over; `updateRevealBtn()`
+    is now just "re-render the panel if it's open" (the standalone `#revealBtn` and its mobile
+    `Word (N)` compact label are gone). The desktop tools row is now only **Hints + Give up**,
+    and the mobile footer tools row likewise (Reveal lives in the Hints modal there).
   - **First sentence** (`first_sentence`, `revealFirstSentenceHint`): reveals the article's
     lead sentence **in place** — its non-title words un-redact in the body
     (`paintFirstSentenceTokens` reveals the *specific token objects*, not by key, so the
@@ -108,9 +119,16 @@ a standalone Node script run by GitHub Actions.
     The per-word lit is persisted/synced separately as **`letterLits`** (`letterLitsSnapshot()` /
     `applyLetterLits()`; a pre-`letterLits` save/sync falls back to `distributeLettersFallback`).
     `applyGuess` only refreshes the open panel mask on a title-word guess (the title span is
-    handled by `revealKey`; nothing re-flows). Letters never mark a word `revealed` (purely a
-    visual hint — solving still needs the guess/free-reveal). Replaces the old single
-    first-letter tier. All local from the title.
+    handled by `revealKey`; nothing re-flows). **Spelling a word's LAST letter promotes it to a
+    real guessed word**: `revealNextLetter` detects `t.lit >= revealableCount(t.word)` and calls
+    `applyGuess(t.key, t.word, false)` (guessed-guarded, idempotent), so the word counts toward
+    the solve, shows in the history, reveals its body occurrences, and — in co-op — broadcasts as
+    a normal `guess` so every teammate's board registers it the same way. This is **score-neutral**
+    (a correct guess is `+0`; the letters were already charged via `letterCost(lettersRevealed)`)
+    and doesn't make a clean solve (buying any letter already flips `summaryUsed`). Completing the
+    final title word this way therefore wins the game (worst score, since the whole title was
+    bought letter-by-letter — self-balancing). A partly-lit word stays purely visual until its
+    last letter lands. Replaces the old single first-letter tier. All local from the title.
 
   Which tiers were shown is tracked in **`hintTiers`** (persisted in the daily localStorage
   state and restored into the panel) — for the two derived tiers `lettersRevealed` /
@@ -716,32 +734,38 @@ width clears the class. (`--header-h` is unaffected; the left feed drawer still 
 `top:var(--header-h)`.)
 
 **Mobile article top + Hints popup (done).** On mobile the top of the
-article shows only the **Share** + **Daily metrics** buttons (`.statusbtns`); the status
-message (`#status`) is **hidden** (`.statusbar .status { display:none }`). The **Hints**
+article shows only a **Social** + **Daily metrics** button (`.statusbtns`); the status
+message (`#status`) is **hidden** (`.statusbar .status { display:none }`).
+**Social popup:** on mobile the **Share** + **Invite (co-op)** buttons collapse behind one
+**Social** button (`#socialBtn`, shown only ≤640px) that opens the `#socialmodal` popup.
+`placeSocial()` reparents the SAME `#shareBtn`/`#inviteBtn` nodes by viewport (mobile → into
+`#socialModalBody`; desktop → back into `.statusbtns` before "Daily metrics") — same trick as
+`placeHintbox`, so `updateInviteBtn` keeps toggling the one `#inviteBtn` node either place, and
+on desktop the two buttons stay inline (Social hidden via CSS). Clicking Share/Invite inside the
+popup closes it; ✕ / backdrop / Esc also close it. The **Hints**
 panel (`#hintbox`, built by `renderHints()`) is shown **in a popup**, not above the
 article: the footer **Hints** button (`showHints()`) opens the `#hintsmodal` modal (same
 `.modal`/`.modal-card` pattern as How to play / Settings — ✕, backdrop-click, Esc). A JS
 `placeHintbox()` **reparents `#hintbox` by viewport** — mobile → into `#hintsModalBody`
-(inside the modal); desktop → back into `#controlcol` above `#history` (rendered inline,
-no modal). CSS `order` can't move a node across containers, hence the reparent; it runs at
+(inside the modal); desktop → back into `#controlcol` **just above the word guesser
+(`.guessbar`)** (rendered inline, no modal). CSS `order` can't move a node across containers,
+hence the reparent; it runs at
 boot and on the `mqMobile` `change` event (which also closes the popup when leaving
-mobile), and moving the node keeps any already-rendered tiers. `showHints()` only opens
-the modal when `mqMobile.matches`; on desktop it just calls `renderHints()`.
+mobile), and moving the node keeps any already-rendered tiers. `showHints()` **toggles**:
+on mobile it opens/closes the `#hintsmodal`; on desktop it renders the panel if collapsed
+and hides it (`display:none`) if already open.
 
 **Tools + guesses + guesser → sticky footer (done).** Below **`640px`** the whole
 `#controlcol` (not just the guessbar) is **`position:fixed` to the bottom of the viewport**
-as a flex column, stacked top→bottom via `order`: the **tool buttons** (`.tools` — Reveal /
-Hints / Give up; **always one row** — `flex-wrap:nowrap`, the buttons share
+as a flex column, stacked top→bottom via `order`: the **tool buttons** (`.tools` — now just
+**Hints / Give up**; Reveal-a-word moved into the Hints panel, so the footer has two tools,
+not three; **always one row** — `flex-wrap:nowrap`, the buttons share
 the width equally (`flex:1 1 0`) and their label scales with the viewport
 (`font-size:clamp(.52rem, 2.7vw, .66rem)`) so nothing wraps down to ~300px; the buttons
 also carry `overflow:hidden; text-overflow:ellipsis` as a safety net so no label can ever
-spill out of the fixed footer. The Reveal
-button uses a **compact label on mobile**, `Word (N)` / `Cancel` instead of `Reveal a
-word (N left)`, set in `updateRevealBtn()` via a `matchMedia` check. **Gotcha:**
-`updateRevealBtn()` only runs once `initGame()` does — i.e. *after* the article finishes
-loading from the network — so to avoid the static full-text default flashing (and
-overflowing) during that async window, **boot sets `#revealBtn` to `"Word (3)"`
-immediately on mobile** (`if (mqMobile.matches) …`, next to `placeHintbox()`). Then the
+spill out of the fixed footer. (The free-word reveal is now the first row of the Hints
+modal — `revealTier`/`toggleArm`; arming it closes the modal so the article is tappable.)
+Then the
 **guessed-words list** (`.history`, scrolls), then the
 **guesser row** (`.guessbar`). On mobile the guessbar gains a small **↑ back-to-top button**
 (`#guessTopBtn`, `.guess-top`) left of the `#guess` input (hidden on desktop via the base

@@ -23,10 +23,12 @@
 // Request  (POST):  { "title": "<answer>", "text": "<excerpt>", "puzzleId"?: "<id>" }
 // Response (JSON):  { "summary": "<packet or empty>", "status": "ready" | "pending" }
 //   `summary` carries a JSON STRING of the layered hint packet
-//   {"category","summary","synonym","first_letter"} (or "" when no usable hint). It's
-//   stored verbatim in puzzles.summary and parsed by the client (parseHintPacket).
-//   Legacy rows / puzzle.json may hold a plain sentence (or a packet without `synonym`,
-//   from before that tier existed) — the client copes with all of these.
+//   {"category","summary","synonyms","first_letter"} (or "" when no usable hint), where
+//   `synonyms` is a PER-WORD array (one close synonym per title word, in order; "" for a
+//   proper name / function word). It's stored verbatim in puzzles.summary and parsed by the
+//   client (parseHintPacket). Legacy rows / puzzle.json may hold a plain sentence, a packet
+//   with a single combined `synonym` string, or one without any synonym field — the client
+//   copes with all of these.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -91,37 +93,38 @@ function foldText(s: string): string {
   return String(s).normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase();
 }
 
-// Ask Groq — in ONE call — for the layered hint packet {category, summary, synonym,
-// first_letter}. The model writes `category` + `summary` + `synonym` as JSON;
-// `first_letter` is computed here. Keeping it ONE batched call (not one per tier) is what
-// respects Groq's per-minute request limit — see CLAUDE.md. ~910 tokens/call, well under
-// the free tier's 12K TPM / 30 RPM. Returns a JSON STRING of the packet, or "" on any
-// failure / when no tier is usable.
+// Ask Groq — in ONE call — for the layered hint packet {category, summary, synonyms,
+// first_letter}. The model writes `category` + `summary` + `synonyms` (a PER-WORD array)
+// as JSON; `first_letter` is computed here. Keeping it ONE batched call (not one per tier)
+// is what respects Groq's per-minute request limit — see CLAUDE.md. ~1K tokens/call, well
+// under the free tier's 12K TPM / 30 RPM. Returns a JSON STRING of the packet, or "" on any
+// failure / when no tier is usable. The model is given the article's first sentence (the
+// start of the excerpt) so it can both base the summary on it AND judge, per title word,
+// whether the word is a proper name (→ no synonym).
 // The per-field leak filter is kept in sync with leaksTitle in
 // scripts/lib/leak-filter.mjs (the unit-tested reference).
 async function generate(title: string, text: string): Promise<string> {
   const key = Deno.env.get("GROQ_API_KEY");
   if (!key) return "";
   const sys = "You write layered, spoiler-controlled hints for a word-guessing game where the player "
-    + "must guess an article title. Return ONLY a JSON object with exactly three string keys:\n"
+    + "must guess an article title. You are given the title and the article's first sentence(s). "
+    + "Return ONLY a JSON object with exactly these keys:\n"
     + "  \"category\": 3-6 words naming the general KIND of subject (e.g. 'A fictional character', "
     + "'A historical battle', 'A type of food'). No proper nouns.\n"
-    + "  \"summary\": one vague sentence, max 18 words, describing the subject in general terms.\n"
-    + "  \"synonym\": the MOST revealing hint — get as close and literal to the title's meaning as the "
-    + "no-leak rule allows (~1-5 words). Replace any PROPER NAME in the title (person, character, place, "
-    + "organisation) — EVEN when it is only PART of a longer phrase — with a generic word for its KIND "
-    + "(a personal name -> \"a character\"/\"a person\", a place -> \"a place\", an org -> "
-    + "\"an organisation\"), and give a close synonym for the remaining common words; combine them "
-    + "naturally. Examples: \"Bob's Diary\" -> \"a character's journal\"; \"Battle of Hastings\" -> "
-    + "\"a historic clash at a place\"; a title that is ONLY a name -> \"a person's name\" / "
-    + "\"a place name\". NEVER include a title word or an obvious variant.\n"
+    + "  \"summary\": one vague sentence, max 18 words, describing the subject in general terms — "
+    + "base it on the article's FIRST SENTENCE and the title, generalised (no proper nouns).\n"
+    + "  \"synonyms\": a JSON ARRAY with EXACTLY one entry per word in the title, IN THE SAME ORDER. "
+    + "Each entry is a close 1-3 word synonym of THAT single word — the MOST revealing tier, so get "
+    + "as literal as the no-leak rule allows. Use the first sentence to judge each word: if a word is "
+    + "a PROPER NAME (a person, character, place or organisation) or a function word (the, of, a, and, "
+    + "in, ...), return an EMPTY STRING \"\" for it (names get no synonym). Example title \"Bob's Diary\" "
+    + "-> [\"\", \"journal\"] (Bob is a name, diary -> journal).\n"
     + "Rules for ALL fields: NEVER write the title or any of its words, names, or close variants; "
-    + "avoid proper nouns. `category` and `summary` must be evocative but NOT identifying; `synonym` "
-    + "should be as literal and close in meaning as possible (it is the highest-cost, most revealing tier) "
-    + "but must still not literally contain a title word. "
-    + "Output ONLY the JSON object, nothing else.";
+    + "avoid proper nouns. `category` and `summary` must be evocative but NOT identifying; each "
+    + "`synonyms` entry should be as literal and close in meaning as possible but must still not "
+    + "literally contain a title word. Output ONLY the JSON object, nothing else.";
   const user = `Title (the answer — never mention it or its words): "${title}"\n\n`
-    + `Article excerpt:\n${String(text).slice(0, 1500)}\n\nReturn the JSON object.`;
+    + `Article first sentence(s) / excerpt:\n${String(text).slice(0, 1500)}\n\nReturn the JSON object.`;
   try {
     const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
@@ -129,7 +132,7 @@ async function generate(title: string, text: string): Promise<string> {
       body: JSON.stringify({
         model: GROQ_MODEL,
         messages: [{ role: "system", content: sys }, { role: "user", content: user }],
-        max_tokens: 260, temperature: 0.7,   // 3 short fields now (category + summary + synonym); first_letter is computed here
+        max_tokens: 320, temperature: 0.7,   // category + summary + a per-word synonyms array; first_letter is computed here
         response_format: { type: "json_object" },
       }),
       // bound a slow/hung Groq so we don't hold the daily's generation claim (and the
@@ -142,22 +145,26 @@ async function generate(title: string, text: string): Promise<string> {
     const content = (j.choices?.[0]?.message?.content || "").trim();
     let parsed: Record<string, unknown> = {};
     try { parsed = JSON.parse(content); } catch { return ""; }
-    let category = String(parsed.category || "").trim().replace(/^["']+|["']+$/g, "").trim();
-    let summary = String(parsed.summary || "").trim().replace(/^["']+|["']+$/g, "").trim();
-    let synonym = String(parsed.synonym || "").trim().replace(/^["']+|["']+$/g, "").trim();
-    // per-field leak filter: blank ONLY the field that contains a significant title word
-    // (keep the other tiers). Mirrors leaksTitle in scripts/lib/leak-filter.mjs — folds
-    // diacritics and matches Unicode letters/numbers, so an accented/non-Latin title
-    // (Pokémon, Cyrillic, CJK) is actually guarded instead of silently producing 0 words.
-    // The synonym is MEANT to be close in meaning, but the same filter still bars it from
-    // literally containing a title word/variant (so it stays a synonym, never the answer).
+    const clean = (s: unknown) => String(s || "").trim().replace(/^["']+|["']+$/g, "").trim();
+    let category = clean(parsed.category);
+    let summary = clean(parsed.summary);
+    // synonyms: a per-word array of strings (the prompt asks for that, with "" for names).
+    // Non-string entries from a drifted model degrade to "" → blanked below. Harmless.
+    const rawSyn = Array.isArray(parsed.synonyms) ? parsed.synonyms : [];
+    let synonyms = rawSyn.map((e: unknown) => clean(typeof e === "string" ? e : ""));
+    // per-field leak filter: blank ONLY a field/entry that contains a significant title word
+    // (keep the rest). Mirrors leaksTitle in scripts/lib/leak-filter.mjs — folds diacritics and
+    // matches Unicode letters/numbers, so an accented/non-Latin title (Pokémon, Cyrillic, CJK)
+    // is actually guarded instead of silently producing 0 words. Each per-word synonym is MEANT
+    // to be close in meaning, but the same filter still bars it from literally containing a
+    // title word/variant (so it stays a synonym, never the answer).
     const titleWords = foldText(title).match(/[\p{L}\p{N}]{3,}/gu) || [];
     const leaks = (s: string) => { const low = foldText(s); return titleWords.some((w: string) => low.includes(w)); };
     if (category.length < 3 || category.length > 80 || leaks(category)) category = "";
     if (summary.length < 8 || summary.length > 200 || leaks(summary)) summary = "";
-    if (synonym.length < 2 || synonym.length > 60 || leaks(synonym)) synonym = "";
-    if (!category && !summary && !synonym) return "";   // nothing usable from the model
-    return JSON.stringify({ category, summary, synonym, first_letter: firstLetterOf(title) });
+    synonyms = synonyms.map((s: string) => (s.length >= 2 && s.length <= 60 && !leaks(s)) ? s : "");
+    if (!category && !summary && !synonyms.some(Boolean)) return "";   // nothing usable from the model
+    return JSON.stringify({ category, summary, synonyms, first_letter: firstLetterOf(title) });
   } catch {
     return "";
   }

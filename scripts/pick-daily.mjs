@@ -89,11 +89,19 @@ const FALLBACK_WIKIS = [
   "dragonage.fandom.com", "halo.fandom.com", "godofwar.fandom.com", "kingdomhearts.fandom.com",
 ];
 
-// Load the enabled wiki pool from Supabase; fall back to the baked-in list.
-async function loadWikis() {
+// Supabase service-role creds (base url + key), or null when either is missing —
+// e.g. a local dry run without a .env. Every REST helper below starts here.
+const creds = () => {
   const base = process.env.SUPABASE_URL?.replace(/\/$/, "");
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (base && key) {
+  return base && key ? { base, key } : null;
+};
+
+// Load the enabled wiki pool from Supabase; fall back to the baked-in list.
+async function loadWikis() {
+  const c = creds();
+  if (c) {
+    const { base, key } = c;
     try {
       const url = base + "/rest/v1/wikis?select=host&enabled=eq.true";
       const r = await fetch(url, { headers: { apikey: key, Authorization: "Bearer " + key } });
@@ -161,9 +169,9 @@ export const pickedKey = (wiki, title) => wiki + " " + String(title).toLowerCase
 
 // drop picks older than EXPIRE_DAYS (by created_at) so those articles can be chosen again
 async function prunePicked() {
-  const base = process.env.SUPABASE_URL?.replace(/\/$/, "");
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!base || !key) return 0;
+  const c = creds();
+  if (!c) return 0;
+  const { base, key } = c;
   const cutoff = new Date(Date.now() - EXPIRE_DAYS * 86400000).toISOString();
   try {
     const r = await fetch(base + "/rest/v1/picked?created_at=lt." + encodeURIComponent(cutoff), {
@@ -178,9 +186,9 @@ async function prunePicked() {
 
 // every article the picker has already used (private `picked` table), so it never repeats one
 async function loadPickedKeys() {
-  const base = process.env.SUPABASE_URL?.replace(/\/$/, "");
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!base || !key) return new Set();
+  const c = creds();
+  if (!c) return new Set();
+  const { base, key } = c;
   try {
     const r = await fetch(base + "/rest/v1/picked?select=wiki,title",
       { headers: { apikey: key, Authorization: "Bearer " + key } });
@@ -191,9 +199,9 @@ async function loadPickedKeys() {
 
 // remember a chosen article so it won't be picked again
 async function recordPicked(wiki, title, date) {
-  const base = process.env.SUPABASE_URL?.replace(/\/$/, "");
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!base || !key) return;
+  const c = creds();
+  if (!c) return;
+  const { base, key } = c;
   try {
     await fetch(base + "/rest/v1/picked", {
       method: "POST",
@@ -316,9 +324,9 @@ async function pickForWiki(wiki, seen, rounds = ATTEMPTS) {
 // fresh articles from the pool (recordPicked marks them used even though they're
 // never shown). So the second run of a given local day exits early instead.
 async function alreadyPicked(date) {
-  const base = process.env.SUPABASE_URL?.replace(/\/$/, "");
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!base || !key) return false;
+  const c = creds();
+  if (!c) return false;
+  const { base, key } = c;
   try {
     const r = await fetch(base + "/rest/v1/puzzles?select=id&date=eq." + encodeURIComponent(date) + "&limit=1",
       { headers: { apikey: key, Authorization: "Bearer " + key } });
@@ -331,9 +339,9 @@ async function alreadyPicked(date) {
 // Last resort: reuse one of this wiki's earlier dailies so the feed never has a gap.
 // Picks at random among the most recent ones so it isn't always the same repeat.
 async function pastDailyFor(wiki) {
-  const base = process.env.SUPABASE_URL?.replace(/\/$/, "");
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!base || !key) return null;
+  const c = creds();
+  if (!c) return null;
+  const { base, key } = c;
   try {
     const r = await fetch(base + "/rest/v1/puzzles?select=revision_id&wiki=eq." +
       encodeURIComponent(wiki) + "&order=date.desc&limit=30",
@@ -350,9 +358,9 @@ async function pastDailyFor(wiki) {
 // Function the first time a player asks for it. See supabase/functions/hint.
 
 async function upsert(rows) {
-  const base = process.env.SUPABASE_URL?.replace(/\/$/, "");
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!base || !key) throw new Error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set");
+  const c = creds();
+  if (!c) throw new Error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set");
+  const { base, key } = c;
   // Resolve the upsert against the (wiki, date) unique constraint — the real "one
   // daily per fandom per day" key — not the primary key (id). Without on_conflict,
   // PostgREST dedups on the id PK, so a row with the same (wiki, date) but a

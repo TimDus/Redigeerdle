@@ -73,7 +73,7 @@ test("Give up ends the game, locks all controls, and shows in the share", async 
   await expect(page.locator("#winHead")).toHaveText("GAVE UP");
   await expect(page.locator("#winText")).toContainText("Golden Snitch");  // answer revealed
   // play + every hint control is locked
-  for (const id of ["#guess", "#go", "#revealBtn", "#hintsBtn", "#giveUpBtn"]) {
+  for (const id of ["#guess", "#go", "#hintsBtn", "#giveUpBtn"]) {
     await expect(page.locator(id)).toBeDisabled();
   }
   await page.click("#shareBtn");
@@ -88,7 +88,7 @@ test("a given-up daily stays ended after reload", async ({ page }) => {
   await page.reload();
   await expect(page.locator("#winHead")).toHaveText("GAVE UP", { timeout: 20_000 });
   await expect(page.locator("#guess")).toBeDisabled();
-  await expect(page.locator("#revealBtn")).toBeDisabled();   // stays locked after reload
+  await expect(page.locator("#hintsBtn")).toBeDisabled();   // hint controls stay locked after reload
 });
 
 test("a title word's plural can't be free-revealed", async ({ page }) => {
@@ -119,7 +119,7 @@ test("a solved daily stays solved after reload", async ({ page }) => {
   // restores as solved: win shown and input locked, so it can't be re-played
   await expect(page.locator("#win")).toHaveClass(/show/, { timeout: 20_000 });
   await expect(page.locator("#guess")).toBeDisabled();
-  await expect(page.locator("#revealBtn")).toBeDisabled();   // hint controls stay locked too
+  await expect(page.locator("#hintsBtn")).toBeDisabled();   // hint controls stay locked too
 });
 
 // A solo (random/custom) game must resume on a plain reload — the same article AND its
@@ -165,9 +165,9 @@ test("share text breaks down good/bad guesses, reveals and help used", async ({ 
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.fill("#guess", "snitch"); await page.press("#guess", "Enter");   // good (hits the text)
   await page.fill("#guess", "zzzzzz"); await page.press("#guess", "Enter");   // bad (no match)
-  await page.click("#revealBtn");                                             // arm a reveal
-  await page.locator("#body .red.revealable").first().click();               // use 1 reveal 💡
   await page.click("#hintsBtn");                                             // open the Hints panel
+  await page.click('.hint-tier[data-tier="reveal_word"] .hint-reveal');       // arm a reveal (now a panel row)
+  await page.locator("#body .red.revealable").first().click();               // use 1 reveal 💡
   await page.click('.hint-tier[data-tier="summary"] .hint-reveal');          // reveal the summary tier
   await page.click("#shareBtn");
   const clip = await page.evaluate(() => navigator.clipboard.readText());
@@ -214,6 +214,18 @@ test("synonym tier: reveals the AI synonym, costs +50, and shows in the share", 
   // and it surfaces in the share breakdown with its own icon
   const share = await page.evaluate(() => buildShareText());
   expect(share).toContain("🔁 synonym");
+});
+
+test("synonym tier: per-word synonyms render positionally, names shown as '(a name)'", async ({ page }) => {
+  // current packet shape: one synonym per title word, in order; "" = a proper name
+  await page.evaluate(() => { hints = { category: "", summary: "", synonyms: ["glittering", ""], first_letter: "" }; });
+  await page.click("#hintsBtn");
+  const row = page.locator('.hint-tier[data-tier="synonym"]');
+  await row.locator(".hint-reveal").click();
+  // the synonym for word 1 shows; the name word (empty entry) renders as a marker, NOT a title word
+  await expect(row.locator(".hint-tier-val")).toContainText("glittering");
+  await expect(row.locator(".hint-tier-val")).toContainText("(a name)");
+  await expect(row.locator(".hint-tier-val")).not.toContainText("Snitch");
 });
 
 test("a chosen-fandom source is shown but FREE — it isn't scored or listed as a used hint", async ({ page }) => {
@@ -276,6 +288,20 @@ test("Letters tier un-redacts the actual title; reveals are PINNED (no free re-f
   await lettersBtn.click();
   await expect(page.locator("#title .letterlit")).toHaveText("S");
   expect(await page.evaluate(() => lettersRevealed)).toBe(3);
+});
+
+test("Letters tier: fully spelling a word with letters enters it as a guessed word", async ({ page }) => {
+  await page.click("#hintsBtn");
+  const lettersBtn = page.locator('.hint-tier[data-tier="first_letter"] .hint-reveal');
+  // "Golden Snitch": buy all 6 letters of the first word "Golden" to fully spell it out
+  for (let i = 0; i < 6; i++) await lettersBtn.click();
+  // it's now a real guessed word: in the guessed set + guess history (hits > 0), not a reveal
+  expect(await page.evaluate(() => guessed.has("golden"))).toBe(true);
+  expect(await page.evaluate(() => guesses.some(g => norm(g.word) === "golden" && g.hits > 0 && !g.hint))).toBe(true);
+  // the title shows "Golden" fully revealed (promoted from letter-lit to guessed) — and the
+  // game isn't solved, because "Snitch" is still hidden
+  await expect(page.locator("#title .red.shown").filter({ hasText: "Golden" }).first()).toBeVisible();
+  expect(await page.evaluate(() => solved)).toBe(false);
 });
 
 test("First sentence tier: reveals the lead sentence in place but keeps title words blacked", async ({ page }) => {
@@ -353,6 +379,22 @@ test("mobile: the Hints button opens a popup with the tiers (not above the artic
   await expect(page.locator('#hintsmodal .hint-tier[data-tier="summary"] .hint-tier-val')).toBeVisible();
   await page.click("#hintsClose");   // ✕ closes it
   await expect(page.locator("#hintsmodal")).not.toHaveClass(/open/);
+});
+
+test("mobile: Share + Invite collapse into a 'Social' popup", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload();   // re-boot at mobile width so placeSocial moves the buttons into the modal
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+  // Share + Invite are reparented into the popup body; the bar shows the single "Social" button
+  await expect(page.locator("#socialModalBody #shareBtn")).toBeAttached();
+  await expect(page.locator("#socialModalBody #inviteBtn")).toBeAttached();
+  await expect(page.locator("#socialBtn")).toBeVisible();
+  await expect(page.locator("#socialmodal")).not.toHaveClass(/open/);
+  await page.click("#socialBtn");
+  await expect(page.locator("#socialmodal")).toHaveClass(/open/);
+  await expect(page.locator("#socialmodal #shareBtn")).toBeVisible();   // Share reachable inside
+  await page.click("#socialClose");   // ✕ closes it
+  await expect(page.locator("#socialmodal")).not.toHaveClass(/open/);
 });
 
 test("sign-up rejects a password shorter than 6 characters", async ({ page }) => {

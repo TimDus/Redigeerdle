@@ -162,10 +162,10 @@ test("co-op: a remote free-word reveal decrements the shared reveal allowance", 
   await loadHP(page);
   await page.evaluate(() => mp.createRoom("coop"));
 
-  // 3 reveals to start (desktop label)
-  await expect(page.locator("#revealBtn")).toContainText("3");
+  // 3 reveals to start; a teammate's remote reveal decrements the shared allowance
+  expect(await page.evaluate(() => hintsLeft)).toBe(3);
   await page.evaluate(() => mp._recv("reveal", { key: "snitch", by: "Bob" }));
-  await expect(page.locator("#revealBtn")).toContainText("2");
+  expect(await page.evaluate(() => hintsLeft)).toBe(2);
 });
 
 test("versus: a guest waits until the host starts, then the board unlocks", async ({ page }) => {
