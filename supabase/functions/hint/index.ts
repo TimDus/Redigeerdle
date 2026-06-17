@@ -123,26 +123,49 @@ async function generate(title: string, text: string, categories: string[] = []):
   // category list can mislead the hint but never leak the answer.
   const cats = (Array.isArray(categories) ? categories : [])
     .filter((c) => typeof c === "string" && c.trim()).map((c) => c.trim().slice(0, 60)).slice(0, 12);
-  const sys = "You write layered, spoiler-controlled hints for a word-guessing game where the player "
-    + "must guess an article title. You are given the title and the article's first sentence(s). "
-    + "Return ONLY a JSON object with exactly these keys:\n"
-    + "  \"category\": 3-6 words naming the general KIND of subject (e.g. 'A fictional character', "
-    + "'A historical battle', 'A type of food'). No proper nouns. When the user message lists the "
-    + "page's WIKI CATEGORIES, base `category` on them — keep the ones naming the general KIND of "
-    + "subject and generalise them; IGNORE proper-noun/setting names and any resembling the title. "
-    + "Otherwise infer it from the article.\n"
-    + "  \"summary\": one vague sentence, max 18 words, describing the subject in general terms — "
-    + "base it on the article's FIRST SENTENCE and the title, generalised (no proper nouns).\n"
-    + "  \"synonyms\": a JSON ARRAY with EXACTLY one entry per word in the title, IN THE SAME ORDER. "
-    + "Each entry is a close 1-3 word synonym of THAT single word — the MOST revealing tier, so get "
-    + "as literal as the no-leak rule allows. Use the first sentence to judge each word: if a word is "
-    + "a PROPER NAME (a person, character, place or organisation) or a function word (the, of, a, and, "
-    + "in, ...), return an EMPTY STRING \"\" for it (names get no synonym). Example title \"Bob's Diary\" "
-    + "-> [\"\", \"journal\"] (Bob is a name, diary -> journal).\n"
-    + "Rules for ALL fields: NEVER write the title or any of its words, names, or close variants; "
-    + "avoid proper nouns. `category` and `summary` must be evocative but NOT identifying; each "
-    + "`synonyms` entry should be as literal and close in meaning as possible but must still not "
-    + "literally contain a title word. Output ONLY the JSON object, nothing else.";
+  const sys =
+      "You write layered, spoiler-controlled hints for a word-guessing game. The player sees an "
+    + "article with its TITLE blacked out and must guess that title. You produce three hint tiers, "
+    + "ordered from VAGUEST to MOST revealing: \"category\" (vaguest) -> \"summary\" -> \"synonyms\" "
+    + "(most revealing). You are given the exact title (the answer), the page's wiki categories, and "
+    + "the article's opening text. Return ONLY a JSON object with exactly these three keys — no "
+    + "markdown, no commentary, nothing else.\n\n"
+
+    + "GOLDEN RULE (applies to EVERY field): never write the title, any word of the title, a name "
+    + "from the title, or an obvious variant/inflection of a title word. A title word counts as used "
+    + "even when it appears only INSIDE a longer word — if the title contains \"Hold\" you may NOT "
+    + "output \"stronghold\", \"household\" or \"holding\" (each contains \"hold\"); pick a different "
+    + "word such as \"fortress\" or \"keep\". Avoid proper nouns everywhere unless a field explicitly "
+    + "allows them. When unsure, be vaguer.\n\n"
+
+    + "\"category\" (string): 3-6 words naming the general KIND of thing the subject is — e.g. "
+    + "\"A fictional character\", \"A historical battle\", \"A type of food\", \"A fortified "
+    + "settlement\". No proper nouns. If the user message lists WIKI CATEGORIES, BASE this on them: "
+    + "keep the ones that describe the kind of subject, generalise them into ONE natural phrase, and "
+    + "IGNORE category names that are proper nouns, setting/franchise names, or that resemble the "
+    + "title. If none are useful, infer the kind from the article text.\n\n"
+
+    + "\"summary\" (string): ONE sentence, at most 18 words, describing the subject in general, "
+    + "NON-identifying terms. Base it on the article's FIRST sentence plus the title, but generalise: "
+    + "no proper nouns, no title words, nothing that lets the player name the exact subject outright. "
+    + "It should be informative, not a giveaway.\n\n"
+
+    + "\"synonyms\" (array of strings): the MOST revealing tier. Split the title into words on spaces. "
+    + "The array MUST contain EXACTLY one entry per title word, in the SAME left-to-right order (a "
+    + "3-word title -> a length-3 array). Count the words carefully. For each word, give a close 1-3 "
+    + "word synonym or paraphrase of THAT single word, as literal as the GOLDEN RULE allows. Use an "
+    + "EMPTY STRING \"\" for any word that has no useful synonym: a PROPER NAME (a person, character, "
+    + "place, or organisation — judge from the article text) or a function word (the, of, a, an, and, "
+    + "in, to, ...). A synonym must NEVER contain its title word as a substring.\n\n"
+
+    + "Worked examples (title -> synonyms):\n"
+    + "  \"Bob's Diary\" -> [\"\", \"journal\"]   (Bob's = a name -> \"\"; Diary -> journal)\n"
+    + "  \"Black Hole\" -> [\"dark\", \"void\"]   (both common words: Black -> dark, Hole -> void)\n"
+    + "  \"Battle of Hastings\" -> [\"clash\", \"\", \"\"]   (Battle -> clash; of = function word; "
+    + "Hastings = a place name -> \"\")\n"
+    + "  \"Excalibur\" -> [\"\"]   (a single proper name -> no synonym)\n\n"
+
+    + "Output ONLY the JSON object.";
   const user = `Title (the answer — never mention it or its words): "${title}"\n\n`
     + (cats.length ? `Wiki categories for this page (base "category" on these): ${cats.join(", ")}\n\n` : "")
     + `Article first sentence(s) / excerpt:\n${String(text).slice(0, EXCERPT_CHARS)}\n\nReturn the JSON object.`;
