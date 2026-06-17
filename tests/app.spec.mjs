@@ -76,7 +76,7 @@ test("Give up ends the game, locks all controls, and shows in the share", async 
   for (const id of ["#guess", "#go", "#hintsBtn", "#giveUpBtn"]) {
     await expect(page.locator(id)).toBeDisabled();
   }
-  await page.click("#shareBtn");
+  await page.click("#socialBtn"); await page.click("#shareBtn");   // Share lives in the Social popup
   const clip = await page.evaluate(() => navigator.clipboard.readText());
   expect(clip).toContain("gave up");
 });
@@ -154,7 +154,7 @@ test("the guess field shows a live letter count", async ({ page }) => {
 
 test("Share copies the custom text to the clipboard (no native share sheet)", async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
-  await page.click("#shareBtn");
+  await page.click("#socialBtn"); await page.click("#shareBtn");   // Share lives in the Social popup
   await expect(page.locator("#status")).toContainText("Copied to clipboard");
   const clip = await page.evaluate(() => navigator.clipboard.readText());
   expect(clip).toContain("Redigeerdle");      // our custom message survived
@@ -169,7 +169,7 @@ test("share text breaks down good/bad guesses, reveals and help used", async ({ 
   await page.click('.hint-tier[data-tier="reveal_word"] .hint-reveal');       // arm a reveal (now a panel row)
   await page.locator("#body .red.revealable").first().click();               // use 1 reveal 💡
   await page.click('.hint-tier[data-tier="summary"] .hint-reveal');          // reveal the summary tier
-  await page.click("#shareBtn");
+  await page.click("#socialBtn"); await page.click("#shareBtn");   // Share lives in the Social popup
   const clip = await page.evaluate(() => navigator.clipboard.readText());
   expect(clip).toContain("✅ 1 good");
   expect(clip).toContain("❌ 1 bad");
@@ -207,7 +207,8 @@ test("synonym tier: reveals the AI synonym, costs +50, and shows in the share", 
   await row.locator(".hint-reveal").click();
   await expect(row.locator(".hint-tier-val")).toContainText("Automobile");
 
-  // it's the priciest tier: +50 (no guesses, time zeroed so the pill is exactly the tier cost)
+  // synonym scales with title length: +25 per non-stop title word. "Golden Snitch" = 2 words → 50.
+  // (no guesses, time zeroed so the pill is exactly the tier cost)
   await page.evaluate(() => { playActiveMs = 0; playTickAt = 0; updateScore(); });
   await expect(page.locator("#scoreVal")).toHaveText("50");
 
@@ -226,6 +227,31 @@ test("synonym tier: reconstructs the title — synonyms substituted, undecoded n
   await expect(val.locator("i")).toHaveText("Name");      // undecoded name → italic placeholder
   await expect(val).not.toContainText("Snitch");          // never the real title word
   expect((await val.textContent()).trim()).toBe("glittering Name");
+});
+
+test("synonym cost excludes already-guessed title words (prices per STILL-HIDDEN word)", async ({ page }) => {
+  // "Golden Snitch" has 2 title words. Guess one first → only 1 remains hidden, so the synonym
+  // (which would reveal nothing for the word you already know) should cost +25, not +50.
+  await page.fill("#guess", "golden"); await page.press("#guess", "Enter");   // 1 of 2 title words
+  await page.evaluate(() => { hints = { category: "", summary: "", synonyms: ["x", "y"], first_letter: "" }; });
+  await page.click("#hintsBtn");
+  const btn = page.locator('.hint-tier[data-tier="synonym"] .hint-reveal');
+  await expect(btn).toContainText("+25");        // live price: 1 hidden title word × 25
+  await btn.click();
+  await page.evaluate(() => { playActiveMs = 0; playTickAt = 0; updateScore(); });
+  await expect(page.locator("#scoreVal")).toHaveText("25");   // synonym +25; the correct title guess was free
+});
+
+test("title-progress pill tracks title words found and flags completion", async ({ page }) => {
+  // "Golden Snitch" = 2 non-stop title words → the win condition is finding both
+  await expect(page.locator("#titleProgress")).toBeVisible();
+  await expect(page.locator("#titleProgress")).toContainText("0/2");
+  await page.fill("#guess", "golden"); await page.press("#guess", "Enter");
+  await expect(page.locator("#titleProgress")).toContainText("1/2");
+  await page.fill("#guess", "snitch"); await page.press("#guess", "Enter");   // second title word → solves
+  await expect(page.locator("#win")).toHaveClass(/show/);
+  await expect(page.locator("#titleProgress")).toContainText("2/2");
+  await expect(page.locator("#titleProgress")).toHaveClass(/complete/);
 });
 
 test("a chosen-fandom source is shown but FREE — it isn't scored or listed as a used hint", async ({ page }) => {
@@ -361,7 +387,7 @@ test("used hints survive a reload (summary comes back, reflected in share)", asy
   await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
   // the revealed summary tier comes back on its own (panel re-rendered from saved state)
   await expect(page.locator('.hint-tier[data-tier="summary"] .hint-tier-val')).toBeVisible();
-  await page.click("#shareBtn");
+  await page.click("#socialBtn"); await page.click("#shareBtn");   // Share lives in the Social popup
   const clip = await page.evaluate(() => navigator.clipboard.readText());
   expect(clip).toContain("📄 summary");
 });

@@ -21,8 +21,22 @@ a standalone Node script run by GitHub Actions.
   the player guesses get written into the DOM. Anything that would persist the answer
   server-side is a regression. (The `plays` log stores a `revision_id` — that's a
   *pointer*, like `puzzles.revision_id`, not the answer text; it's safe because `plays`
-  is owner-only. Never expose `wiki` + `revision_id` together for *today's* featured
-  daily in any **public** surface — that would leak the source, itself a paid hint.)
+  is owner-only.)
+  - **The featured daily's source (`wiki` + `revision_id`) is a SOFT/UI concealment, not a
+    hard secret — and that's by design, not a bug.** The **Source** hint tier hides which
+    wiki the article came from (the feed's pinned card shows a neutral "⭐ Featured daily",
+    `attribution()` stays generic until you finish, the status text never names it). But the
+    `puzzles` table is **public-read** (`using (true)`) and the *anon browser client must read
+    `wiki`+`revision_id` itself* to fetch the article live at the pinned revision — that's the
+    core "puzzle is only a pointer, article fetched client-side" invariant. So today's featured
+    `wiki`+`rev` is necessarily reachable by anyone with the anon key (a direct
+    `GET puzzles?select=wiki,revision_id&is_featured=eq.true&date=eq.<today>`, or just devtools
+    while playing). A `security definer` RPC would **not** close this — it'd return the same
+    pointer to the same anon caller; the only true hard-hide is server-side article proxying,
+    which would break the pointer-only invariant. This is acceptable because the source is a
+    *hint*, never the **answer**: the title itself is still never stored (re-derived from the
+    revision client-side and server-side). So: keep the source out of the UI/share/feed surfaces
+    (a casual player shouldn't be handed it), but don't pretend it's cryptographically secret.
 - **The `picked` table is private**: it holds titles (answers), so it has RLS enabled
   with **no policy** — only the picker's `service_role` key (which bypasses RLS)
   touches it. The anon/browser client must never read it.
@@ -75,7 +89,9 @@ a standalone Node script run by GitHub Actions.
   substring, e.g. "stronghold" for "Hold"), so a synonym can be close yet never contains the answer.
   **The client renders it as the TITLE's SHAPE** (`buildSynonymValue()`): each word replaced by its
   synonym, function/stop words left literal (already revealed in the title), and an undecoded name
-  shown as an **italic "Name"** — e.g. *"Hold of Verkal Gulan"* → *keep of Name Name*; *"Triwizard
+  shown as an **italic "Name"**. A **stop word is rendered literally FIRST** (checked before the
+  array entry), so a stray/misaligned array value at its slot can never turn *of* into *Name* —
+  e.g. *"Hold of Verkal Gulan"* → *fortress of Name Name*, never *fortress Name Name Name*; *"Triwizard
   Tournament"* → *three magician contest*. It **never prints a hidden title word**. The JSON string is
   stored verbatim in **`puzzles.summary`** (still a `text` column — no migration) and
   parsed client-side (`parseHintPacket`, which also copes with **legacy plain-sentence**
@@ -88,7 +104,14 @@ a standalone Node script run by GitHub Actions.
   (Gemini→Groq, above) and writes the result back to `puzzles.summary`. Concurrent first-clickers are de-duped by
   an **atomic claim** on `puzzles.summary_generating_at` (`UPDATE … WHERE summary IS NULL
   AND the claim is free/stale`); the loser gets `status:"pending"` and the client polls.
-  Random/custom games call the same function with no `puzzleId` → generate, no cache.
+  Random/custom games call the same function with no `puzzleId` → generate, no cache; for these
+  the packet is fetched **in the background** at article load (`fetchAndApplyHint`, tracked as the
+  `hintFetch` promise). If the player reveals an AI tier **while that fetch is still in flight**
+  (Gemini can take several seconds), `revealTier` shows the **"Generating hint…"** state and
+  **awaits `hintFetch`** rather than flashing the "(no … for this puzzle)" placeholder — the
+  placeholder only appears once the packet has genuinely landed empty. (`haveTierData(key)` is the
+  "do we already have this tier" check used both to reveal instantly and after the await; it knows
+  the synonym tier lives in the `synonyms` array, not `hints.synonym`.)
   **UI** ([index.html](index.html)): a single **"Hints"** button (`#hintsBtn`) **TOGGLES**
   the `#hintbox` panel (`showHints()` — open/render if collapsed, hide if open; on mobile it
   opens/closes the `#hintsmodal` popup). The panel is rebuilt by **`renderHints()`** — a
@@ -152,10 +175,12 @@ a standalone Node script run by GitHub Actions.
     last letter lands. Replaces the old single first-letter tier. All local from the title.
 
   Which tiers were shown is tracked in **`hintTiers`** (persisted in the daily localStorage
-  state and restored into the panel) — for the two derived tiers `lettersRevealed` /
-  `letterLits` / `firstSentenceUsed` / `firstSentenceWords` are persisted **alongside** it and
-  restored (`paintFirstSentenceTokens` re-reveals the sentence body on resume; `applyLetterLits`
-  re-pins the per-word reveals — or `distributeLettersFallback` for a pre-`letterLits` save;
+  state and restored into the panel) — the per-word-priced counters `lettersRevealed` /
+  `letterLits` / `firstSentenceUsed` / `firstSentenceWords` / **`synonymWords`** are persisted
+  **alongside** it and restored (`paintFirstSentenceTokens` re-reveals the sentence body on resume;
+  `applyLetterLits` re-pins the per-word reveals — or `distributeLettersFallback` for a
+  pre-`letterLits` save; `synonymWords` falls back to the live `synonymHiddenCount()` for a
+  pre-`synonymWords` save that already revealed the tier;
   back-compat: a pre-counter save with `first_letter` in `hintTiers` → `lettersRevealed = 1`).
   `summaryUsed` stays the rollup boolean (any AI/derived tier used) for the `plays`
   `summary_used` column, `fandomUsed`/`source_used` for **Source**. **The leak filter now runs per field** (blank only the
@@ -214,20 +239,29 @@ way (the source wiki is itself a paid hint). Covered by the two share tests in
 A golf-style score: **the goal is the lowest total**. A correct typed guess is free
 (`+0`); every bit of help — **and time** — adds points: **`+1` for every full 10 seconds
 of active play** (`SCORE.per10s`), **wrong guess `+1`, free word reveal `+5`, the
-**source** / **summary** / **category** hint tiers `+10` each, the **synonym** tier `+50`
-(the most revealing AI tier). Two derived tiers cost dynamically: the **first-sentence**
-tier is `firstSentencePer` (`+3`) **per still-hidden word it uncovers** (`firstSentenceBase`
-is `0`), locked at purchase in `firstSentenceWords` (its live panel price drops by 3 as you
-guess words in the sentence); the **Letters** tier escalates —
-letter *n* costs `letterBase + (n-1)*letterStep` (`+20, +25, +30, …`), so `letterCost(k)`
-sums the first `k` (the first letter still costs `+20`, matching the old single tier). The
-point values live in the `SCORE` map and `computeScore()` derives the total
+**source** / **summary** / **category** hint tiers `+10` each. **Three** tiers cost
+dynamically, all on the same "per still-hidden word, locked at purchase" model:
+- the **synonym** tier (the most revealing AI tier) is `SCORE.synonymPer` (`+25`) **× the
+  number of STILL-HIDDEN non-stop title words** (`synonymHiddenCount()`) — it reconstructs the
+  title's *shape*, but a synonym for a word you've **already guessed reveals nothing**, so those
+  don't count. The displayed Reveal price is **live** (drops by `synonymPer` each time you guess
+  a title word — `applyGuess` re-renders the open panel), and the count is **locked at purchase**
+  into `synonymWords` (so a later title-word guess can't retroactively cheapen a hint you already
+  got). A 2-word title with none guessed ≈ the old flat `+50`. Locked in `addTier` (and in the
+  co-op `_applyRemoteHint`/`_applySync` from the sender's value, so every teammate pays the same).
+- the **first-sentence** tier is `firstSentencePer` (`+3`)
+  **per still-hidden word it uncovers** (`firstSentenceBase` is `0`), locked at purchase in
+  `firstSentenceWords` (its live panel price drops by 3 as you guess words in the sentence).
+- the **Letters** tier escalates — letter *n* costs `letterBase + (n-1)*letterStep`
+  (`+20, +25, +30, …`), so `letterCost(k)` sums the first `k` (the first letter still costs
+  `+20`). The point values live in the `SCORE` map and `computeScore()` derives the total
 **purely from the same play state the share line uses** (`guesses` → bad/reveal counts,
 `hintTiers`, `fandomUsed`, `lettersRevealed`, `firstSentenceUsed`/`firstSentenceWords`,
 plus `playActiveMs`) — so the live pill, the share text and the win/give-up banner can
 never disagree (no separately-tracked counter to drift). `computeScore()` is defined next
-to `buildShareText()`. NB `first_letter`/`first_sentence` are **skipped** in the flat
-`hintTiers` cost loop — they're costed from their own counters.
+to `buildShareText()`. NB `first_letter`/`first_sentence`/`synonym` are **skipped** in the
+flat `hintTiers` cost loop — they're costed from their own counters (`letterCost`,
+`firstSentenceWords`, `synonymWords`).
 
 **The Source tier is FREE when the player chose the fandom.** When a game starts with the
 source already revealed because the player explicitly picked that fandom — a feed
@@ -266,10 +300,22 @@ Shown **live** in a `#scorePill` (`Score: <b id="scoreVal">`) in the `.statusbar
 on both desktop and mobile (the status *message* is hidden on mobile, but the pill stays).
 `updateScore()` repaints it and is called from **`refreshMeta()`** (every guess/reveal),
 **`renderHints()`** (every hint-tier reveal), and a **1-second score clock** (`setInterval`,
-near `placeHintbox`) that accrues the time slice, repaints **only when the displayed score
+near `placeHintbox`) that **early-returns when `playClockRunning()` is false** (not started /
+finished / tab hidden / versus pre-start — the score is frozen, so it skips the recompute),
+else accrues the time slice, repaints **only when the displayed score
 changed**, and — **in versus** — re-broadcasts progress so opponents' standings tick up live.
 It also lands in the **share text** (`buildShareText`) and the **win / give-up banner**
 (`checkWin`/`giveUp`). When you add a new hint tier or paid action, add its cost to `SCORE`.
+
+**Title-progress pill** (`#titleProgress`, next to `#scorePill` in the `.statusbar`, so it's
+visible on **both** desktop and mobile). It shows **`🎯 N/M`** — non-stop title words found /
+total (`titleKeyWords`) — surfacing the *actual win condition* (the masked title shows shape
+but didn't say "you're 1 of 2 there"). Updated in `refreshMeta()`; gets a `.complete` class
+(green) once all title words are found. It **leaks nothing** — the count is already inferable
+from the masked title's boxes. Reinforced by feedback in `applyGuess`: a typed guess that hits
+a title word flashes **green** (`flashKey` → `.flash-title`, vs the yellow `.flash` for an
+ordinary hit) and sets a celebratory `#status` ("🎯 Title word! N of M — keep going."; the
+status line is hidden on mobile, so the pill + green flash carry the signal there).
 
 **Persisted for stats**: `recordPlay()` writes `computeScore()` into the **`plays.score`**
 column (migration `20260615120000_add_plays_score.sql`, nullable — pre-column rows just
@@ -758,12 +804,13 @@ width clears the class. (`--header-h` is unaffected; the left feed drawer still 
 **Mobile article top + Hints popup (done).** On mobile the top of the
 article shows only a **Social** + **Daily metrics** button (`.statusbtns`); the status
 message (`#status`) is **hidden** (`.statusbar .status { display:none }`).
-**Social popup:** on mobile the **Share** + **Invite (co-op)** buttons collapse behind one
-**Social** button (`#socialBtn`, shown only ≤640px) that opens the `#socialmodal` popup.
-`placeSocial()` reparents the SAME `#shareBtn`/`#inviteBtn` nodes by viewport (mobile → into
-`#socialModalBody`; desktop → back into `.statusbtns` before "Daily metrics") — same trick as
-`placeHintbox`, so `updateInviteBtn` keeps toggling the one `#inviteBtn` node either place, and
-on desktop the two buttons stay inline (Social hidden via CSS). Clicking Share/Invite inside the
+**Social popup:** on **every width** the **Share** + **Invite (co-op)** buttons collapse behind one
+**Social** button (`#socialBtn`, always shown) that opens the `#socialmodal` popup — desktop and
+mobile behave identically now (the old desktop-inline layout is gone). `placeSocial()` reparents
+the SAME `#shareBtn`/`#inviteBtn` nodes into `#socialModalBody` (a one-time move; runs at boot and
+on the mobile-breakpoint change), so `updateInviteBtn` keeps toggling the one `#inviteBtn` node
+there — including **hiding Invite once the game is solved/given up** (`!solved && !gaveUp` in
+`updateInviteBtn`, unchanged by the relocation). Clicking Share/Invite inside the
 popup closes it; ✕ / backdrop / Esc also close it. The **Hints**
 panel (`#hintbox`, built by `renderHints()`) is shown **in a popup**, not above the
 article: the footer **Hints** button (`showHints()`) opens the `#hintsmodal` modal (same
@@ -796,8 +843,12 @@ then a **smaller** `#go` Guess button. The footer is **capped
 at `3/7` of the viewport height** (`max-height:calc(100vh * 3 / 7)`); the history scrolls
 inside that cap, and with no guesses yet the footer shrinks to just tools + guesser.
 `z-index:30` keeps it **under the modals (`50`) and the feed drawer (`35`/`40`)** so those
-still cover it when open. The `.meta` strip (counts / show-lengths / Top) is **hidden** here
-(TODO: re-home it); the `.hintbox` (the Hints panel output) opens in the `#hintsmodal`
+still cover it when open. The `.meta` strip (Guesses / Revealed% / show-lengths) is
+**re-homed into the footer** here as a slim single row (`order:2`, between the tools and the
+history) — it used to be hidden on mobile; the redundant **Top** button is dropped (`#topBtn`
+hidden ≤640px) since the guessbar already carries its own ↑ (`#guessTopBtn`), and the
+win-progress is covered by the `#titleProgress` pill in the status bar. The `.hintbox` (the
+Hints panel output) opens in the `#hintsmodal`
 popup (see above), not in the footer. A JS sync publishes `#controlcol`'s live height as
 **`--footer-h`** (a `ResizeObserver`,
 mirroring the `--header-h` one) so `.wrap`'s `padding-bottom` tracks the footer as it
@@ -931,6 +982,14 @@ solves that and also records `wiki` on every row, so later **per-fandom aggregat
   gameplay. `checkWin`/`giveUp` no longer call `recordPlay` directly (the trailing
   `saveDailyState()` covers them); `onAuth` and the tail of `restoreDailyState()` sync
   the current snapshot on sign-in / resume.
+- **`recordPlay()` is DEBOUNCED** (the public name is the scheduler; the worker is
+  `recordPlayNow()`). It coalesces the per-guess upserts into **one trailing write
+  ~1.5s after the last change** (`RECORD_PLAY_DEBOUNCE`) instead of a network round-trip
+  on every keystroke-guess. A **FINISHED game flushes immediately** (`solved || gaveUp` →
+  `recordPlayFlush()`), so the terminal row is never delayed/lost; a **tab-hide
+  (`visibilitychange`) and `pagehide`** also `recordPlayFlush()` so an in-progress row
+  survives a quick close within the debounce window. (The Playwright `plays` tests poll
+  with a multi-second timeout, so the debounce is transparent to them.)
 - **`play_id` is the upsert key** (`unique(user_id, play_id)`), so repeated calls update
   ONE row. Dailies use `play_id = puzzle_id` (a same-day resume keeps the same row);
   random/custom mint a fresh `play_id` per game (`mintPlayId()`), so each is its own row —
@@ -950,7 +1009,16 @@ solves that and also records `wiki` on every row, so later **per-fandom aggregat
   `(gameFinishedAt || Date.now()) - gameStartedAt` — so a solved/given-up daily reopened
   later in the day (or a post-finish Hints reveal → `saveDailyState` →
   `recordPlay`) does **not** keep the duration ticking past the solve moment. Cadence is
-  **one upsert per guess** (chosen tradeoff); debounce if write volume ever matters.
+  the **debounced** write described above (was one-upsert-per-guess).
+
+**Per-guess performance (the hot path).** A guess touches only the tokens for that word, not
+the whole article: `initGame` builds a **`tokensByKey` Map** (`key → token[]`, document order)
+and caches **`nonStopTotal`** (the revealed-% denominator), so `recordGuess`/`revealKey`/
+`flashKey`/`gotoWord` are O(hits) not O(all tokens). The **`#history` list is append-only** —
+`refreshMeta` prepends just the one new row (via `guessRow(g)`, tracked by `historyRendered`)
+instead of `innerHTML=""`-rebuilding the whole list every guess; it self-heals with a full
+rebuild if the list ever shrinks (only `initGame` resets `guesses`). Rows are immutable once
+built (hits + co-op `by` are set before render), which is what makes append-only safe.
 
 ## My stats (personal aggregate over `plays`)
 
@@ -1061,12 +1129,41 @@ anonymous auth**. This needs **"Allow anonymous sign-ins" enabled in the dashboa
   wrapper and the true browser end-to-end (anon play → sign-in → merge) — smoke-test those
   in the live app after deploy.
 
+## Game archive (past dailies)
+
+A **"Past dailies"** list lets a player play/replay days they missed. It's a collapsible
+native `<details class="feed-archive">` at the bottom of the **feed drawer**, built in
+`renderFeed()` → `buildArchiveCard()`.
+- **Query**: one `puzzles` read for `date < today AND date >= today-30d AND (is_featured OR
+  wiki in <your follows>)`, `order(date desc) limit 150`. The pinned (today/latest) featured
+  row is filtered out so it isn't duplicated. Rows sort date-desc, featured-first within a date.
+- **Scope = featured + followed.** A followed fandom's archive is just a `puzzles`-by-wiki
+  query, **independent of when you followed it** — so following a *new* fandom immediately
+  surfaces its earlier dailies (the user's explicit ask).
+- **Privacy** (same invariant as the feed's pinned card / My-stats source selector): a
+  **featured** archive row renders NEUTRALLY ("⭐ Featured daily", never its wiki name); a
+  **followed-fandom** row shows its name/icon (you chose it). Click loads via
+  `loadPuzzlePointer(p, { revealFandom: !p.is_featured, archive: true })`.
+- **Scoring/resume — the `archivePlay` flag.** Set in `loadArticle`'s daily branch from
+  `opts.archive` (threaded by `loadPuzzlePointer`), reset in `initGame`. It gates two things:
+  `submitScore()` early-returns (a back-dated featured solve must **never** hit the competitive
+  `scores` leaderboard), and `rememberLastGame()` early-returns (an archive play must not hijack
+  the boot resume — you reload back onto your home daily, and the archive game's progress is
+  saved per-puzzle so re-opening its card restores it). It **still** counts in personal `plays`
+  stats, the heatmap (keyed by `puzzle_date`, so it greens the right day), and the
+  `daily_metrics` completion aggregate. Replay-block + `restoreFinishedFromServer` already work
+  per-puzzle, so a daily you finished before shows ✓/✗ and re-locks.
+- **Filter**: `filterFeedCards` selects `#feedCards > .feedcard` (DIRECT children) so the
+  archive cards (which live inside the `<details>`) are untouched by the live feed search.
+- Covered in [tests/supabase.spec.mjs](tests/supabase.spec.mjs) ("Archive: past dailies list…").
+
 ## Roadmap context
 
 Remaining open ideas: **per-fandom leaderboards** (repoint `scores` to `(user, wiki,
 date)`); **public fandom-stats aggregates** over `plays` via a `security definer` RPC
-(keeps raw rows private); and whether the feed should ever require an account. All
-deferred.
+(keeps raw rows private); a **`?d=<id>` shareable link to a specific archived daily** (falls
+out of the puzzle-id load path for free); and whether the feed should ever require an account.
+All deferred.
 
 **Image hint tier** (deferred — next hint idea after First sentence + Letters): a
 **progressively-unblurred main image** as a new `#hintbox` tier. Fetch the article's lead
@@ -1079,21 +1176,3 @@ url as **untrusted** on custom/shared `?wiki=&rev=` links (`safeHttpUrl()`, neve
 `innerHTML`). Add its icon to `SHARE_ICON`, a cost to `SCORE`, and persist its
 blur-step/used state alongside `lettersRevealed`/`firstSentenceUsed`. Some articles have no
 lead image → the tier should hide (like First sentence when nothing's left to uncover).
-
-**Game archive** (deferred): a browsable list of **past dailies** so a player can play (or
-replay) days they missed. The data already exists — past dailies persist as `puzzles` rows
-(one per `(wiki, date)`), each a safe pointer (`{id, wiki, revision_id, date, is_featured}`,
-never the title), so the archive is essentially a **`puzzles` query for dates `< today`**
-filtered to the chosen source (e.g. featured, or a followed fandom). Design notes for when
-it's built: a row loads via the existing `loadPuzzlePointer`/`loadDailyForWiki` path keyed
-by **puzzle id** (so progress/replay-block stay per-puzzle); keep the **answer-privacy
-invariant** — list only pointers, and for a **featured** archive entry use the neutral
-"Featured daily" label + ⭐ icon (never the underlying wiki name, same as the feed's pinned
-card and My-stats source selector). Decide scoring/streak treatment up front: an archived
-play already greens the heatmap on its own `puzzle_date` (the heatmap keys by puzzle date,
-not play day), and `restoreFinishedFromServer` already re-locks a daily finished on another
-device — so an old daily the player solved before will show as completed; whether a *fresh*
-archive solve of the **featured** daily should still submit to the competitive `scores`
-leaderboard (probably **not**, to avoid back-dated entries) is the main open question. UI
-likely belongs in the feed drawer or a dedicated modal; a `?d=<id>`-style shareable link to
-a specific archived daily would fall out for free.

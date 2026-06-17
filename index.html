@@ -197,7 +197,7 @@
   .statusbtns { display:flex; gap:8px; flex:0 0 auto; margin-left:auto; }
   .statusbtns button { background:var(--paper); color:var(--ink); padding:7px 12px; font-size:.72rem; }
   .statusbtns button:hover:not(:disabled) { background:var(--ink); color:var(--paper); border-color:var(--ink); }
-  #socialBtn { display:none; }   /* mobile-only: Share + Invite collapse into it (placeSocial) */
+  #socialBtn { display:inline-block; }   /* Share + Invite collapse behind it on every width (placeSocial) */
   #socialModalBody { display:flex; flex-direction:column; gap:10px; }
   #socialModalBody button { display:block; width:100%; }
   #article { grid-area:article; }
@@ -252,14 +252,17 @@
     #controlcol #go { padding:8px 9px; font-size:.62rem; flex:0 0 auto; }
     /* small "back to top" button left of the guess field (mobile only) */
     #controlcol .guess-top { display:inline-flex; align-items:center; justify-content:center; flex:0 0 auto; padding:8px 10px; font-size:1rem; line-height:1; }
-    #controlcol .meta { display:none; }
+    /* re-home the meta strip into the footer (order 2, between tools and history) as a slim
+       single row — surfaces Guesses / Revealed% / show-lengths on mobile (it used to be hidden).
+       The redundant "Top" button is dropped: the guessbar already has its own ↑ (#guessTopBtn). */
+    #controlcol .meta { order:2; display:flex; align-items:center; gap:10px; margin:0; flex:0 0 auto; font-size:.62rem; }
+    #controlcol .meta #topBtn { display:none; }
     .wrap { padding-bottom:calc(var(--footer-h, 150px) + 12px); }
     /* the status message is dropped on mobile; only the Social / Daily-metrics
        buttons stay at the top of the article (Share + Invite are reparented into the
        #socialmodal popup behind the "Social" button — see placeSocial). */
     .statusbar .status { display:none; }
     .statusbar { margin-bottom:8px; }
-    #socialBtn { display:inline-block; }
     /* the Hints panel (#hintbox) is reparented by JS into the #hintsmodal popup on
        mobile (opened by the footer "Hints" button), so it no longer sits above the
        article. Inside the modal it shows flush (no extra margin) and scrolls with the
@@ -286,6 +289,11 @@
   #title .letterlit { border-bottom:2px solid var(--marker); }
   /* the yellow marker keeps dark text in both themes (light text on yellow is unreadable) */
   .flash { background:var(--marker); color:#1a1a1a; transition:background 1.2s ease; }
+  /* a guess that hits a TITLE word (the win condition) flashes GREEN, not yellow, so it
+     reads as "that mattered" — distinct from an ordinary body-word hit. */
+  .flash-title { background:#1f9d55; color:#fff; transition:background 1.4s ease; }
+  /* the title-progress pill: tint it green once every title word is found (you've won / are about to) */
+  #titleProgress.complete b { color:#1f9d55; }
   /* history navigation: every occurrence of the clicked word, and the active one */
   .red.locate { background:var(--marker); color:#1a1a1a; border-radius:2px; transition:background .2s ease; }
   .red.locate-active { background:var(--classified); color:#fff; border-radius:2px; box-shadow:0 0 0 2px var(--classified); }
@@ -390,6 +398,12 @@
   .feedcard.empty { cursor:default; opacity:.55; }
   .feedcard .fc-status { font-weight:700; color:var(--classified); }
   .feed-empty { font-family:var(--mono); font-size:.74rem; color:var(--muted); }
+  /* Archive: collapsible list of past dailies (native <details>) */
+  .feed-archive { border-top:1px solid var(--line); margin-top:4px; padding-top:4px; }
+  .feed-archive > summary { cursor:pointer; padding:8px 4px; font-family:var(--mono); font-size:.76rem; color:var(--muted); }
+  .feed-archive > summary:hover, .feed-archive[open] > summary { color:var(--ink); }
+  .feed-archive .feedcard { margin-top:5px; }
+  .archcard .fc-status { color:var(--muted); font-weight:400; font-size:.72rem; white-space:nowrap; }
   /* mobile-only quick actions pinned at the bottom of the drawer (New game /
      Settings / How to play). On desktop these live in the header, so hidden here. */
   .feed-actions { display:none; flex:0 0 auto; }
@@ -576,6 +590,7 @@
         <li>Your real goal is to uncover the hidden <strong>title</strong> at the top. Crack it and you win.</li>
         <li>Stuck on a word? <strong>Reveal a word</strong> lets you click any blacked-out word in the text to expose it — you get 3 free reveals, but title words stay locked.</li>
         <li>Need a nudge on the topic? <strong>Hints</strong> opens spoiler-free clues you can reveal one at a time — a category, a summary, the title's first letter, and the source wiki.</li>
+        <li>It's <strong>golf — the lowest score wins</strong>. Correct guesses are free; wrong guesses, word reveals and each hint add points, and the clock ticks up slowly while you play. Every Reveal button shows what it'll cost, and the running total sits in the <strong>Score</strong> badge.</li>
         <li>A fresh <strong>Daily</strong> puzzle drops every day. In <strong>Settings</strong> you can follow your favourite fandoms (each gets its own daily) and pick which one you land on; open the <strong>☰</strong> menu to browse and play them. Want more? <strong>New game</strong> → curated, full random, a specific fandom, or your own wiki link.</li>
         <li>When you solve it (or <strong>Give up</strong>), <strong>Share</strong> your result — and check <strong>Daily metrics</strong> to see how everyone else did.</li>
       </ul>
@@ -629,7 +644,8 @@
   <div id="playarea">
     <div class="statusbar" id="statusbar">
       <div class="status" id="status">Loading puzzle…</div>
-      <div class="score" id="scorePill" title="Your score — lower is better. +1 for every 10 seconds, wrong guess +1, reveal a word +5, summary/category/source +10, first sentence +3 per hidden word it reveals, each title letter +20 then +5 more each, synonym +50. Correct guesses are free.">Score: <b id="scoreVal">0</b></div>
+      <div class="score" id="titleProgress" title="Title words you've uncovered — get them all to win. (Already-shown short words like “of/the” don't count.)" hidden>🎯 <b id="titleFound">0</b>/<b id="titleTotal">0</b></div>
+      <div class="score" id="scorePill" title="Your score — lower is better. +1 for every 10 seconds, wrong guess +1, reveal a word +5, summary/category/source +10, first sentence +3 per hidden word it reveals, each title letter +20 then +5 more each, synonym scales with title length. Correct guesses are free.">Score: <b id="scoreVal">0</b></div>
       <div class="statusbtns">
         <button id="shareBtn">Share</button>
         <button id="inviteBtn" hidden>Invite (co-op)</button>
@@ -726,6 +742,14 @@ who whom whose what when where why how all any some more most such into over und
 after before between during without within up down out off`.split(/\s+/));
 
 let guesses, guessed, tokens, titleKeyWords, titleKeySet, titleStemSet, titleToks, bodyBlocks, META, hintsLeft, hints, hintTiers, hintLoading, revealArmed, solved, summaryUsed, fandomUsed, gaveUp;
+// key → token[] index (built once per game in initGame) so a guess touches only the tokens
+// for that word instead of scanning the whole (thousands-long) token array every time.
+let tokensByKey = new Map();
+// how many guesses are currently rendered in #history — lets refreshMeta APPEND the one new
+// row per guess instead of tearing down and rebuilding the entire list on every guess.
+let historyRendered = 0;
+// cached count of non-stop tokens (the revealed-% denominator) — fixed for the article.
+let nonStopTotal = 1;
 // sourceFree: the Source tier was revealed for FREE because the player explicitly chose this
 // fandom (a feed follow-card daily, or "Random from a fandom") — so it isn't a paid hint and
 // must NOT add SCORE.source to the final score (see sourceCharged()). Distinct from fandomUsed
@@ -737,7 +761,14 @@ let lettersRevealed = 0;
 // the "First sentence" hint tier: whether it's been bought, and how many still-hidden words
 // it uncovered at purchase (the locked per-word cost). Persisted across daily resumes.
 let firstSentenceUsed = false, firstSentenceWords = 0;
+// the "Synonym" tier prices per STILL-HIDDEN non-stop title word (a synonym for a word you
+// already guessed reveals nothing), locked at purchase like firstSentenceWords. Persisted/synced.
+let synonymWords = 0;
 const EMPTY_HINTS = { category: "", summary: "", synonym: "", synonyms: [], first_letter: "" };
+// in-flight background hint fetch (random/custom games, fetchAndApplyHint) as a Promise, else
+// null — so revealTier can WAIT for it ("Generating hint…") instead of flashing the "no hint"
+// placeholder when the player clicks Reveal before Gemini has answered.
+let hintFetch = null;
 // true when the current daily was restored as *already finished* from the server
 // (solved/gave up on another device, or as a now-merged guest) with no local guess
 // list — suppresses recordPlay/submitScore so we never clobber the real server row
@@ -874,12 +905,14 @@ function drawTitle() {
 // reveal just the tokens for one key in place — avoids re-rendering the whole
 // article on every guess. The tokens are already marked revealed in the model.
 function revealKey(key) {
-  tokens.forEach(t => { if (t.key === key && t.revealed && t.el && !t.el.classList.contains("shown")) showSpan(t); });
+  (tokensByKey.get(key) || []).forEach(t => { if (t.revealed && t.el && !t.el.classList.contains("shown")) showSpan(t); });
 }
 
 function flashKey(key) {
-  document.querySelectorAll('[data-key="'+key+'"]').forEach(el => {
-    if (el.classList.contains("shown")) { el.classList.add("flash"); requestAnimationFrame(() => el.classList.remove("flash")); }
+  // a title-word hit flashes GREEN (the win condition mattered); ordinary hits flash yellow.
+  const cls = titleKeySet.has(key) ? "flash-title" : "flash";
+  (tokensByKey.get(key) || []).forEach(t => {
+    const el = t.el; if (el && el.classList.contains("shown")) { el.classList.add(cls); requestAnimationFrame(() => el.classList.remove(cls)); }
   });
 }
 
@@ -899,7 +932,11 @@ function clearLocate() {
 // selected word always starts at occurrence 1.
 // All occurrences are highlighted; the one we jump to gets a distinct colour.
 function gotoWord(key, scroll = true) {
-  const spans = [...document.querySelectorAll('#body span.shown[data-key="' + key + '"]')];
+  // body occurrences of this word, in document order (the index is built in document order),
+  // limited to ones actually painted as shown — same set the old #body query returned.
+  const spans = (tokensByKey.get(key) || [])
+    .filter(t => t.region === "body" && t.el && t.el.classList.contains("shown"))
+    .map(t => t.el);
   if (!spans.length) return;
   clearLocate();
   if (key !== currentNavKey) {                  // switched words → start fresh at occurrence 1
@@ -916,30 +953,48 @@ function gotoWord(key, scroll = true) {
   if (scroll) el.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
+// build one history row (newest-first list) for a guess. Rows are immutable once made
+// (hits + co-op `by` are set before render), so the list can be appended incrementally.
+function guessRow(g) {
+  const row = document.createElement("div");
+  // rows with hits are clickable: click cycles through that word in the text
+  row.className = "row" + (g.hint ? " hintrow" : (g.hits ? "" : " zero")) + (g.hits ? " nav" : "");
+  if (g.hits) { row.dataset.key = norm(g.word); row.title = "Click to jump to this word in the text"; }
+  const label = g.hint ? g.word + " (revealed)" : g.word;
+  // textContent, not innerHTML — g.word is raw player input (and a restored guess list)
+  const wordSpan = document.createElement("span"); wordSpan.textContent = label;
+  // group the hit-count and (co-op) the guesser's name on the RIGHT, so the count
+  // doesn't float in the middle when a name is shown. Name sits last (achteraan).
+  const rmeta = document.createElement("span"); rmeta.className = "rmeta";
+  const nSpan = document.createElement("span"); nSpan.className = "n" + (g.hits ? " hit" : ""); nSpan.textContent = g.hits;
+  rmeta.appendChild(nSpan);
+  if (g.by) { const by = document.createElement("span"); by.className = "by"; by.textContent = g.by; rmeta.appendChild(by); }
+  row.append(wordSpan, rmeta);
+  return row;
+}
+
 function refreshMeta() {
   document.getElementById("count").textContent = guesses.length;
-  const total = tokens.filter(t => !t.stop).length || 1;
-  const shown = tokens.filter(t => !t.stop && t.revealed).length;
-  document.getElementById("pct").textContent = Math.round(shown/total*100) + "%";
+  const shown = tokens.reduce((n, t) => n + (!t.stop && t.revealed ? 1 : 0), 0);
+  document.getElementById("pct").textContent = Math.round(shown/nonStopTotal*100) + "%";
+  // title-word progress — the ACTUAL win condition (uncover every non-stop title word).
+  // Shown in a status-bar pill (visible on mobile too, unlike the meta strip). The count is
+  // already inferable from the masked title's boxes, so it leaks nothing.
+  const tp = document.getElementById("titleProgress");
+  if (tp && titleKeyWords && titleKeyWords.length) {
+    const found = titleKeyWords.reduce((n, t) => n + (t.revealed ? 1 : 0), 0);
+    document.getElementById("titleFound").textContent = found;
+    document.getElementById("titleTotal").textContent = titleKeyWords.length;
+    tp.hidden = false;
+    tp.classList.toggle("complete", found >= titleKeyWords.length);
+  } else if (tp) { tp.hidden = true; }
   updateScore();
-  const h = document.getElementById("history"); h.innerHTML = "";
-  [...guesses].reverse().forEach(g => {
-    const row = document.createElement("div");
-    // rows with hits are clickable: click cycles through that word in the text
-    row.className = "row" + (g.hint ? " hintrow" : (g.hits ? "" : " zero")) + (g.hits ? " nav" : "");
-    if (g.hits) { row.dataset.key = norm(g.word); row.title = "Click to jump to this word in the text"; }
-    const label = g.hint ? g.word + " (revealed)" : g.word;
-    // textContent, not innerHTML — g.word is raw player input (and a restored guess list)
-    const wordSpan = document.createElement("span"); wordSpan.textContent = label;
-    // group the hit-count and (co-op) the guesser's name on the RIGHT, so the count
-    // doesn't float in the middle when a name is shown. Name sits last (achteraan).
-    const rmeta = document.createElement("span"); rmeta.className = "rmeta";
-    const nSpan = document.createElement("span"); nSpan.className = "n" + (g.hits ? " hit" : ""); nSpan.textContent = g.hits;
-    rmeta.appendChild(nSpan);
-    if (g.by) { const by = document.createElement("span"); by.className = "by"; by.textContent = g.by; rmeta.appendChild(by); }
-    row.append(wordSpan, rmeta);
-    h.appendChild(row);
-  });
+  // APPEND only the guesses not yet in the DOM (newest goes to the front). The list only ever
+  // grows within a game and is reset in initGame; the guard self-heals if it ever shrank.
+  const h = document.getElementById("history");
+  if (guesses.length < historyRendered) { h.innerHTML = ""; historyRendered = 0; }
+  for (let i = historyRendered; i < guesses.length; i++) h.insertBefore(guessRow(guesses[i]), h.firstChild);
+  historyRendered = guesses.length;
   if (mp.active) mp.publishProgress();
   updateInviteBtn();   // also when NOT in a room — that's exactly when the button should appear
 }
@@ -1056,7 +1111,7 @@ function giveUp() {
 // Split out so a batch restore can replay many guesses and render only once.
 function recordGuess(key, raw, isHint) {
   let hits = 0, word = raw;
-  tokens.forEach(t => { if (!t.revealed && t.key === key) { t.revealed = true; word = t.word; hits++; } });
+  (tokensByKey.get(key) || []).forEach(t => { if (!t.revealed) { t.revealed = true; word = t.word; hits++; } });
   guesses.push({ word: isHint ? word : raw, hits, hint: !!isHint });
   guessed.add(key);
   return hits;
@@ -1071,14 +1126,22 @@ function applyGuess(key, raw, isHint, remote) {
   revealKey(key);
   // Refresh the open Hints panel after a guess. A guessed title word becomes fully shown
   // (revealKey painted its title span); Letters-tier reveals are PINNED per word, so nothing
-  // re-flows — we just refresh the panel mask so it shows that word as revealed too. AND while
-  // the first-sentence tier is still buyable, guessing one of its (non-title) words lowers that
-  // tier's live per-word cost, so re-render to keep the displayed price dynamic (-3 per word).
+  // re-flows — we just refresh the panel mask so it shows that word as revealed too. AND the two
+  // per-hidden-word tiers reprice live: first-sentence drops -3 when you guess one of its
+  // (non-title) words; synonym drops -synonymPer when you guess a TITLE word (still buyable).
   if (document.getElementById("hintbox").style.display === "block") {
     const fsAffected = !firstSentenceUsed && firstSentenceSlice().some(t => t.key === key && t.word !== undefined && !isTitleWord(t.key));
-    if ((lettersRevealed > 0 && titleKeySet.has(key)) || fsAffected) renderHints();
+    const synAffected = !hintTiers.includes("synonym") && titleKeySet.has(key);
+    if ((lettersRevealed > 0 && titleKeySet.has(key)) || fsAffected || synAffected) renderHints();
   }
   flashKey(key); refreshMeta(); checkWin();
+  // a typed guess that uncovered a TITLE word (the win condition) gets a celebratory call-out —
+  // otherwise hitting a title word looked identical to any body word. (Status is hidden on
+  // mobile, but the #titleProgress pill + green flash carry the signal there.)
+  if (!isHint && hits > 0 && !solved && titleKeySet.has(key)) {
+    const found = titleKeyWords.reduce((n, t) => n + (t.revealed ? 1 : 0), 0);
+    setStatus("🎯 Title word! " + found + " of " + titleKeyWords.length + " — keep going.");
+  }
   // a correct typed guess moves the locate highlight onto that word (same as
   // clicking it in the history) instead of leaving it on the last word clicked.
   // Skip on the winning guess — checkWin reveals everything and shows the banner.
@@ -1310,6 +1373,7 @@ function nextRevealCost(key) {
   if (key === "first_letter") return SCORE.letterBase + lettersRevealed * SCORE.letterStep;
   if (key === "first_sentence") return SCORE.firstSentenceBase + firstSentenceHiddenCount() * SCORE.firstSentencePer;
   if (key === "source") return SCORE.source;
+  if (key === "synonym") return synonymHiddenCount() * SCORE.synonymPer;   // live: drops as you guess title words
   return SCORE[key] || 0;
 }
 function revealButton(key, label) {
@@ -1342,8 +1406,10 @@ function buildSynonymValue() {
       if (t.sep !== undefined) { v.appendChild(document.createTextNode(t.sep)); return; }
       const syn = String(arr[j] || "").trim();
       j++;
-      if (syn) v.appendChild(document.createTextNode(syn));
-      else if (t.stop) v.appendChild(document.createTextNode(t.word));   // function word — already shown in the title
+      // a function word is already revealed in the title — fill it in literally, NEVER as "Name"
+      // (checked first so a stray array value at its slot can't override it).
+      if (t.stop) v.appendChild(document.createTextNode(t.word));
+      else if (syn) v.appendChild(document.createTextNode(syn));
       else { const i = document.createElement("i"); i.textContent = "Name"; v.appendChild(i); }   // undecoded name
     });
     return v;
@@ -1430,7 +1496,11 @@ function renderHints() {
 
 // mark an AI/letter tier as revealed, sync stats/state, repaint
 function addTier(key) {
-  if (!hintTiers.includes(key)) hintTiers.push(key);
+  const isNew = !hintTiers.includes(key);
+  if (isNew) hintTiers.push(key);
+  // synonym is priced per still-hidden title word — LOCK that count at purchase (first add only)
+  // so a later title-word guess can't retroactively cheapen the hint you already received.
+  if (key === "synonym" && isNew) synonymWords = synonymHiddenCount();
   summaryUsed = true;
   saveDailyState();
   renderHints();
@@ -1481,16 +1551,33 @@ function revealFirstSentenceHint() {
   addTier("first_sentence");
 }
 
+// does the loaded packet already hold usable data for this AI tier? (synonym lives in the
+// `synonyms` array, with `synonym` as the legacy single-string fallback — NOT hints.synonym.)
+function haveTierData(key) {
+  if (!hints) return false;
+  if (key === "synonym") return (Array.isArray(hints.synonyms) && hints.synonyms.some(Boolean)) || !!hints.synonym;
+  return !!hints[key];
+}
+
 async function revealTier(key) {
   if (solved || gaveUp) return;
   if (key === "source") { revealSource(); return; }
   if (key === "first_letter") { revealNextLetter(); return; }
   if (key === "first_sentence") { revealFirstSentenceHint(); return; }
   // category / summary / synonym: need the AI packet. Already have it → reveal immediately.
-  if (hints && hints[key]) { addTier(key); return; }
+  if (haveTierData(key)) { addTier(key); return; }
   // a packet fetch is already in flight (the other AI tier) — wait for it rather than
   // firing a second request; when it lands the panel re-renders with this tier ready.
   if (hintLoading) return;
+  // a random/custom game's hint is being fetched in the BACKGROUND (fetchAndApplyHint) —
+  // show "Generating hint…" and wait for it instead of flashing the "no hint" placeholder.
+  if (hintFetch) {
+    hintLoading = key; renderHints();
+    await hintFetch;
+    hintLoading = null;
+    addTier(key);   // packet landed → renders the tier; genuinely empty → placeholder
+    return;
+  }
   // a daily with no packet yet: generate it lazily — the Edge Function caches it on
   // the puzzle row so every player ends up sharing the same hint.
   if (currentShare.kind === "daily" && supa && dailyPuzzleId) {
@@ -1525,8 +1612,8 @@ function initGame(title, blocks, meta) {
   META = { ...meta, title };
   hints = parseHintPacket(meta.summary) || { ...EMPTY_HINTS };
   hintTiers = []; hintLoading = null;
-  guesses = []; guessed = new Set(); tokens = []; hintsLeft = 3; revealArmed = false; solved = false; summaryUsed = false; fandomUsed = false; sourceFree = false; gaveUp = false; serverFinished = false; mpCoopPlay = false;
-  lettersRevealed = 0; firstSentenceUsed = false; firstSentenceWords = 0;   // reset the two derived-from-article hint tiers (a daily resume restores them)
+  guesses = []; guessed = new Set(); tokens = []; hintsLeft = 3; revealArmed = false; solved = false; summaryUsed = false; fandomUsed = false; sourceFree = false; gaveUp = false; serverFinished = false; mpCoopPlay = false; archivePlay = false;
+  lettersRevealed = 0; firstSentenceUsed = false; firstSentenceWords = 0; synonymWords = 0;   // reset the derived-from-article / per-word-priced hint tiers (a daily resume restores them)
   gameStartedAt = Date.now(); gameFinishedAt = 0;   // reset the clock; a daily resume overrides these with the saved start/finish (restoreDailyState)
   playActiveMs = 0; playTickAt = 0;                 // reset the time-score accumulator (a daily resume restores the saved value)
   wordNav = new Map(); currentNavKey = null;   // reset history-navigation cursors for the new article
@@ -1535,6 +1622,13 @@ function initGame(title, blocks, meta) {
   titleKeyWords = tokens.filter(t => t.region === "title" && !t.stop);
   titleKeySet = new Set(titleKeyWords.map(t => t.key));
   titleStemSet = new Set(titleKeyWords.map(t => stemWord(t.key)));
+  // index every word token by its key (insertion order == document order), and cache the
+  // non-stop total once — neither changes during the game, so the per-guess path is O(hits)
+  // not O(all tokens).
+  tokensByKey = new Map();
+  tokens.forEach(t => { const a = tokensByKey.get(t.key); if (a) a.push(t); else tokensByKey.set(t.key, [t]); });
+  nonStopTotal = tokens.reduce((n, t) => n + (t.stop ? 0 : 1), 0) || 1;
+  document.getElementById("history").innerHTML = ""; historyRendered = 0;   // fresh history for the new article
   document.getElementById("win").classList.remove("show");
   document.getElementById("body").classList.remove("arming");
   const box = document.getElementById("hintbox"); box.style.display = "none"; box.textContent = "";
@@ -1689,6 +1783,7 @@ async function loadArticle(apiBase, wikiLabel, parseParams, opts = {}) {
     dailyDate = opts.dailyDate || null;
     dailyPuzzleId = opts.dailyId || null;
     dailyFeatured = !!opts.featured;
+    archivePlay = !!opts.archive;   // a PAST daily opened from the Archive — personal stats only, no leaderboard, no boot-resume hijack
     // dailies key the play-log row to the puzzle, so a same-day resume updates the
     // same row instead of logging a new play each reload
     currentPlayId = dailyPuzzleId;
@@ -1712,7 +1807,10 @@ async function loadArticle(apiBase, wikiLabel, parseParams, opts = {}) {
   setStatus(opts.statusMsg || "Article loaded — title hidden. Start guessing!");
   // resume a reloaded solo (random/custom) game's progress in place — dailies restore
   // later in loadPuzzlePointer. No-op unless the saved solo game IS this exact article.
-  if (currentShare.kind === "custom") await restoreSoloState();
+  // not while loading INTO a multiplayer room — a co-op/versus joiner whose saved solo game
+  // happens to be this exact wiki@rev would otherwise replay stale guesses/hints onto the
+  // shared board and clobber the room's play-id / game_type (mirrors the guard at line ~1673).
+  if (currentShare.kind === "custom" && !mp._loading && !pendingMpMode) await restoreSoloState();
   // when the player explicitly chose this fandom (Random from a fandom), it's no
   // longer a secret — reveal the source tier. The daily path reveals *after*
   // restoreDailyState (in loadPuzzlePointer), so it can't clobber progress.
@@ -1726,14 +1824,20 @@ async function loadArticle(apiBase, wikiLabel, parseParams, opts = {}) {
 // is absent. (The Hints button itself is already enabled — First letter/Source need no fetch.)
 async function fetchAndApplyHint(title, blocks) {
   if (!supa) return;
-  try {
-    const text = blocks.map(b => b.text).join("\n\n").slice(0, HINT_EXCERPT_CHARS);
-    const { data, error } = await supa.functions.invoke("hint", { body: { title, text, categories: articleCategories } });
-    if (error || !data || !data.summary || solved) return;
-    hints = parseHintPacket(data.summary) || hints;
-    // if the panel is already open, repaint so the now-available tiers offer Reveal
-    if (document.getElementById("hintbox").style.display === "block") renderHints();
-  } catch { /* no hint available — fine */ }
+  const p = (async () => {
+    try {
+      const text = blocks.map(b => b.text).join("\n\n").slice(0, HINT_EXCERPT_CHARS);
+      const { data, error } = await supa.functions.invoke("hint", { body: { title, text, categories: articleCategories } });
+      if (error || !data || !data.summary || solved) return;
+      hints = parseHintPacket(data.summary) || hints;
+    } catch { /* no hint available — fine */ }
+  })();
+  hintFetch = p;
+  await p;
+  if (hintFetch === p) hintFetch = null;
+  // repaint an open panel so the now-available tiers offer Reveal (and any tier left
+  // "Generating hint…" while waiting on this fetch resolves to its value/placeholder)
+  if (document.getElementById("hintbox").style.display === "block") renderHints();
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -2130,6 +2234,7 @@ function lastGame() {
 // Stamp the currently-loaded game so boot can resume it. Dailies store {kind,wiki,day};
 // solo games also store the pinned {rev} so loadFromRevision can reproduce the article.
 function rememberLastGame() {
+  if (archivePlay) return;   // don't let an Archive (past-daily) play hijack the boot resume — keep the prior last game
   try {
     const g = currentShare.kind === "daily"
       ? { kind: "daily", wiki: currentShare.wiki, day: todayLocal() }
@@ -2163,12 +2268,18 @@ const SHARE_ICON = { category: "📂", summary: "📄", first_sentence: "📖", 
    share line uses (guesses / hintTiers / fandomUsed / playActiveMs), so the live
    pill, the share text and the win banner can never disagree. The time component
    freezes at the finish and pauses while the tab is hidden. */
-const SCORE = { wrongGuess: 1, reveal: 5, category: 10, summary: 10, synonym: 50, source: 10, per10s: 1,
+const SCORE = { wrongGuess: 1, reveal: 5, category: 10, summary: 10, source: 10, per10s: 1,
+  synonymPer: 25,                           // Synonym tier: +25 per STILL-HIDDEN non-stop title word (a synonym for a word you already guessed reveals nothing) — locked at purchase in synonymWords; a 2-word title with none guessed ≈ the old flat +50
   letterBase: 20, letterStep: 5,            // Letters tier: letter n costs letterBase + (n-1)*letterStep (20, 25, 30, …)
   firstSentenceBase: 0, firstSentencePer: 3 // First sentence: +3 per still-hidden word it uncovers (no base), locked at purchase
 };
 // total cost of the first k revealed title letters: sum of (letterBase + (n-1)*letterStep)
 function letterCost(k) { k = k || 0; return k * SCORE.letterBase + SCORE.letterStep * (k * (k - 1) / 2); }
+// the synonym tier scales with how much shape it actually reveals = the count of non-stop
+// title words STILL HIDDEN (a synonym for a word you've already guessed reveals nothing).
+// Live for the displayed price (drops as you guess title words); locked into synonymWords at
+// purchase for the score — exactly like the first-sentence tier.
+function synonymHiddenCount() { return (titleKeyWords || []).filter(t => !t.revealed).length; }
 // did the Source tier count as a PAID hint? It's shown (fandomUsed) but free — not scored,
 // not in the share breakdown, not logged as source_used — when the player chose this fandom
 // (sourceFree). Used everywhere the source is treated as "a hint the player spent".
@@ -2178,10 +2289,11 @@ function computeScore() {
   const bad = guesses.filter(g => !g.hint && g.hits === 0).length;   // wrong typed guesses
   const reveals = guesses.filter(g => g.hint).length;                // paid free-word reveals
   let s = bad * SCORE.wrongGuess + reveals * SCORE.reveal;
-  (hintTiers || []).forEach(k => {                                   // category / summary / synonym
-    if (k === "first_letter" || k === "first_sentence") return;      // these two cost from their own counters below
+  (hintTiers || []).forEach(k => {                                   // category / summary (flat +10 each)
+    if (k === "first_letter" || k === "first_sentence" || k === "synonym") return;   // these cost from their own counters below
     s += SCORE[k] || 0;
   });
+  if ((hintTiers || []).includes("synonym")) s += (synonymWords || 0) * SCORE.synonymPer;   // synonym tier — locked hidden-word count at purchase
   if (sourceCharged()) s += SCORE.source;                            // source tier — but free when the player chose this fandom
   s += letterCost(lettersRevealed);                                  // escalating per-letter cost
   if (firstSentenceUsed) s += SCORE.firstSentenceBase + (firstSentenceWords || 0) * SCORE.firstSentencePer;
@@ -2241,8 +2353,9 @@ function buildShareText() {
         : (guesses.length === 0
             ? "Redigeerdle — a redacted article. Can you find the title?"
             : "Redigeerdle — " + plural(guesses.length, "guess", "guesses") + " in, still hunting the title.");
-  // before any play and with no help used, just the teaser
-  if (!gaveUp && guesses.length === 0 && !summaryUsed && !sourceCharged()) return head;
+  // before any play and with no help used (and no time on the clock yet), just the teaser —
+  // include the score check so a time-only score still shows the breakdown, matching the pill.
+  if (!gaveUp && guesses.length === 0 && !summaryUsed && !sourceCharged() && computeScore() === 0) return head;
   const lines = [head];
   const bar = accuracyBar(good, bad);
   if (bar) lines.push(bar);
@@ -2432,6 +2545,8 @@ function filterFollowList() {
 
 /* ---- daily feed: the followed fandoms' dailies for today ---- */
 const todayLocal = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Amsterdam" }).format(new Date());
+// a short "Jun 14"-style label for an ISO date (noon-UTC anchored, DST-safe) — used by the Archive
+const shortDate = ymd => { const [y, m, d] = ymd.split("-").map(Number); return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(Date.UTC(y, m - 1, d, 12))); };
 function readDailyState(id) {
   try { return JSON.parse(localStorage.getItem(stateKey(id))); } catch { return null; }
 }
@@ -2440,7 +2555,7 @@ function readDailyState(id) {
 function filterFeedCards() {
   const q = (document.getElementById("feedSearch").value || "").trim().toLowerCase();
   let shown = 0;
-  document.querySelectorAll("#feedCards .feedcard").forEach(c => {
+  document.querySelectorAll("#feedCards > .feedcard").forEach(c => {   // direct children only — Archive cards live in <details> and aren't filtered
     if (c.dataset.pinned) { c.style.display = ""; return; }   // the general daily is always pinned at the top
     const match = !q || ((c.dataset.name || "") + " " + (c.dataset.host || "")).includes(q);
     c.style.display = match ? "" : "none";
@@ -2483,6 +2598,18 @@ async function renderFeed() {
       puzzles = data || [];
     } catch { puzzles = []; }
   }
+  // Archive: PAST dailies (date < today) — the featured daily each day PLUS any followed
+  // fandom's dailies (incl. ones dated before you followed it — it's just a puzzles query
+  // by wiki, independent of follow date). Last ~30 days, most-recent-first.
+  let archive = [];
+  try {
+    const since = ymdMinus(todayLocal(), 30);
+    let q = supa.from("puzzles").select("*").lt("date", todayLocal()).gte("date", since);
+    q = followed.length ? q.or(`is_featured.eq.true,wiki.in.(${followed.join(",")})`) : q.eq("is_featured", true);
+    const { data } = await q.order("date", { ascending: false }).limit(150);
+    archive = (data || []).filter(p => !featured || p.id !== featured.id);   // don't duplicate the pinned (today-or-latest) featured card
+    archive.sort((a, b) => b.date.localeCompare(a.date) || (b.is_featured ? 1 : 0) - (a.is_featured ? 1 : 0));
+  } catch { archive = []; }
 
   // ---- render phase: stale (a newer render started) or drawer closed → bail before
   // touching the DOM. Everything below is synchronous, so no other render can interleave. ----
@@ -2546,7 +2673,46 @@ async function renderFeed() {
   none.id = "feedNoMatch"; none.className = "feed-empty"; none.hidden = true;
   none.textContent = "No fandom matches your filter.";
   cards.appendChild(none);
-  filterFeedCards();   // re-apply any active filter to the fresh cards
+
+  // ---- Archive: a collapsible list of PAST dailies (personal stats only — never the
+  // leaderboard, see archivePlay). Native <details> so it's closed by default and costs no JS. ----
+  if (archive.length) {
+    const det = document.createElement("details"); det.className = "feed-archive";
+    const sum = document.createElement("summary"); sum.textContent = "📅 Past dailies (" + archive.length + ")";
+    det.appendChild(sum);
+    archive.forEach(p => det.appendChild(buildArchiveCard(p, byHost)));
+    cards.appendChild(det);
+  }
+  filterFeedCards();   // re-apply any active filter to the fresh cards (Archive cards live in <details>, excluded)
+}
+
+// one Archive row: a past daily. Featured rows stay NEUTRAL ("⭐ Featured daily" — the source
+// is a paid hint); a followed fandom's row shows its name/icon. Click loads it as an archive
+// play (revealFandom for the named fandom rows; the featured one stays hidden).
+function buildArchiveCard(p, byHost) {
+  const card = document.createElement("button");
+  card.className = "feedcard archcard";
+  if (p.id === dailyPuzzleId) card.classList.add("active");
+  let name;
+  if (p.is_featured) {
+    const icon = document.createElement("span"); icon.className = "ficon"; icon.textContent = "⭐"; card.appendChild(icon);
+    name = "Featured daily";
+  } else {
+    const w = byHost.get(p.wiki);
+    const icon = wikiIconNode((w && w.icon) || faviconFor(p.wiki)); if (icon) card.appendChild(icon);
+    name = w ? wikiLabel(w) : labelForHost(p.wiki);
+  }
+  const nm = document.createElement("span"); nm.className = "fc-name"; nm.textContent = name; card.appendChild(nm);
+  const st = document.createElement("span"); st.className = "fc-status";
+  const s = readDailyState(p.id);
+  let glyph = "";
+  if (s && s.solved) { glyph = "✓"; card.classList.add("done"); }
+  else if (s && s.gaveUp) { glyph = "✗"; card.classList.add("done"); }
+  else if (s && Array.isArray(s.guesses) && s.guesses.length) glyph = "…";
+  st.textContent = shortDate(p.date) + (glyph ? " " + glyph : "");
+  card.appendChild(st);
+  card.addEventListener("click", () => { closeFeed(); loadPuzzlePointer(p, { revealFandom: !p.is_featured, archive: true }).then(renderFeed); });
+  return card;
 }
 
 /* ---- load the daily puzzle: Supabase first, puzzle.json as fallback ----
@@ -2555,6 +2721,7 @@ async function renderFeed() {
 let dailyDate = null;       // date of the loaded daily, used for scores/leaderboard
 let dailyPuzzleId = null;   // puzzles.id of the loaded daily — the hint cache key + state key
 let dailyFeatured = false;  // is the loaded daily the home-page "featured" one? (only those are scored)
+let archivePlay = false;    // loaded from the Archive (a PAST daily) — counts in personal stats but NOT the competitive `scores` leaderboard, and doesn't hijack the boot resume
 let articleText = "";       // plain body text of the loaded article, for lazy hints
 let articleCategories = [];  // the loaded page's visible wiki categories (the "in:" bar) — Groq bases the Category hint on these
 // how much article prose to send the hint LLM. Bumped from 1500 once Gemini became primary
@@ -2568,7 +2735,7 @@ const HINT_EXCERPT_CHARS = 6000;
 // and opaque shared `?d=` links keep it hidden, as the fandom is itself a hint).
 // The random/custom counterpart reveals *inside* loadArticle (no restore step there);
 // see the `opts.revealFandom && !opts.daily` branch — keep the two in step.
-async function loadPuzzlePointer(p, { revealFandom = false } = {}) {
+async function loadPuzzlePointer(p, { revealFandom = false, archive = false } = {}) {
   const date = p.date || p.id || null;
   const apiBase = await resolveApiBase("https://" + p.wiki);   // /api.php vs /w/api.php (e.g. Wikipedia)
   // status line: when the player picked this fandom, name it nicely (as in Settings);
@@ -2582,6 +2749,7 @@ async function loadPuzzlePointer(p, { revealFandom = false } = {}) {
     { daily: true, dailyDate: date, dailyId: p.id || date, summary: p.summary || "",
       // featured unless the row explicitly says otherwise (home daily / puzzle.json have no flag)
       featured: p.is_featured !== false,
+      archive,   // a PAST daily from the Archive — personal stats only (see archivePlay)
       statusMsg });
   await restoreDailyState();
   if (revealFandom) revealSource(true);   // free (chosen fandom); reveal after restore so saveDailyState can't clobber progress
@@ -2622,6 +2790,7 @@ function saveDailyState() {
       lettersRevealed: lettersRevealed || 0,  // how many title letters the Letters tier was bought (drives cost)
       letterLits: letterLitsSnapshot(),       // the PINNED per-word reveals (so they don't re-flow on resume)
       firstSentenceUsed: !!firstSentenceUsed, firstSentenceWords: firstSentenceWords || 0,   // first-sentence tier + its locked per-word cost
+      synonymWords: synonymWords || 0,        // synonym tier's locked hidden-word count (drives its score)
       gaveUp: !!gaveUp,
       coop: !!mpCoopPlay,   // a daily done co-op stays flagged across a same-day reload (the room itself is ephemeral)
       startedAt: gameStartedAt || null,   // keep the original start so a same-day resume reports honest duration
@@ -2688,6 +2857,10 @@ function replaySavedState(saved) {
     firstSentenceUsed = true;
     paintFirstSentenceTokens();   // re-reveal the lead sentence in the body (cost stays the saved value)
   }
+  // restore the synonym tier's locked hidden-word count (its score). Back-compat: a pre-synonymWords
+  // save with "synonym" already revealed → re-derive from the current (restored) board.
+  if (hintTiers.includes("synonym"))
+    synonymWords = (typeof saved.synonymWords === "number") ? saved.synonymWords : synonymHiddenCount();
   if (hintTiers.length || fandomUsed) renderHints();
   restoring = false;
   if (saved.gaveUp && !solved) giveUp();  // restore a given-up game as ended
@@ -2977,6 +3150,7 @@ async function submitScore() {
   if (!supa || !isRealUser() || !solved || currentShare.kind !== "daily" || !dailyDate || !dailyFeatured) return;
   if (serverFinished) return;   // reconstructed end-state (0 guesses) — never push a bogus leaderboard row
   if (mpCoopPlay) return;       // a co-op solve isn't a fair solo leaderboard entry (it still counts in daily stats via plays)
+  if (archivePlay) return;      // a PAST daily replayed from the Archive — counts in personal stats, but never a back-dated leaderboard entry
   const reveals = guesses.filter(g => g.hint).length;
   const row = { user_id: currentUser.id, puzzle_date: dailyDate, guesses: guesses.length, reveals, solved: true };
   // keep the player's best (fewest guesses) for the day
@@ -2995,7 +3169,21 @@ async function submitScore() {
 // per-player stats log, separate from `scores` (the public daily leaderboard).
 // Owner-only RLS, so it needs a signed-in user; anonymous plays aren't logged.
 // Best-effort: a failure here never blocks gameplay or the end-of-game UI.
-async function recordPlay() {
+// Debounced wrapper around the upsert: coalesce the per-guess writes into ONE trailing
+// network round-trip ~1.5s after the last change, instead of a round-trip on every
+// keystroke-guess. A FINISHED game flushes immediately so the terminal row is never lost
+// (and a tab-hide / unload flushes too — see the listeners near the score clock).
+let _recordPlayTimer = null;
+const RECORD_PLAY_DEBOUNCE = 1500;
+function recordPlay() {
+  if (!supa || !currentUser || restoring || !currentPlayId || serverFinished) return;
+  if (solved || gaveUp) { recordPlayFlush(); return; }   // terminal state → write now, don't wait
+  clearTimeout(_recordPlayTimer);
+  _recordPlayTimer = setTimeout(recordPlayNow, RECORD_PLAY_DEBOUNCE);
+}
+function recordPlayFlush() { clearTimeout(_recordPlayTimer); _recordPlayTimer = null; recordPlayNow(); }
+
+async function recordPlayNow() {
   if (!supa || !currentUser || restoring || !currentPlayId) return;
   // restored-as-finished from the server: we have no real guess data, so logging
   // would overwrite the authoritative server row with a 0-guess snapshot — skip.
@@ -3567,25 +3755,15 @@ function placeHintbox() {
 }
 placeHintbox();
 
-/* On mobile, Share + Invite collapse behind one "Social" button that opens the #socialmodal
-   popup; on desktop they stay inline in the status bar. Same reparent trick as placeHintbox:
-   mobile → move both buttons into #socialModalBody; desktop → back into .statusbtns (before
-   "Daily metrics"). updateInviteBtn still toggles the SAME #inviteBtn node either place. */
+/* On every width, Share + Invite collapse behind one "Social" button that opens the
+   #socialmodal popup (the buttons live in #socialModalBody). updateInviteBtn still toggles
+   the SAME #inviteBtn node there. (placeSocial stays for the original mobile reparent trick;
+   the buttons are now always in the modal, so it's effectively a one-time move.) */
 const shareBtnEl = document.getElementById("shareBtn");
 const inviteBtnEl = document.getElementById("inviteBtn");
 const socialModalBodyEl = document.getElementById("socialModalBody");
-const statusBtnsEl = document.querySelector(".statusbtns");
-const metricsBtnEl = document.getElementById("metricsBtn");
 function placeSocial() {
-  if (mqMobile.matches) {
-    if (shareBtnEl.parentElement !== socialModalBodyEl) socialModalBodyEl.append(shareBtnEl, inviteBtnEl);
-  } else {
-    document.getElementById("socialmodal").classList.remove("open");   // leaving mobile → drop the popup
-    if (shareBtnEl.parentElement !== statusBtnsEl) {
-      statusBtnsEl.insertBefore(shareBtnEl, metricsBtnEl);
-      statusBtnsEl.insertBefore(inviteBtnEl, metricsBtnEl);
-    }
-  }
+  if (shareBtnEl.parentElement !== socialModalBodyEl) socialModalBodyEl.append(shareBtnEl, inviteBtnEl);
 }
 placeSocial();
 
@@ -3601,6 +3779,9 @@ else mqMobile.addListener(onMobileMqChange);
    the finish and pauses while the tab is hidden. */
 let scoreClockLast = -1;
 setInterval(() => {
+  // the clock only moves the TIME component; if it isn't running (not started, finished,
+  // tab hidden, versus pre-start) the score is frozen — skip the recompute entirely.
+  if (!playClockRunning()) return;
   accruePlayTime();
   const s = computeScore();
   if (s === scoreClockLast) return;   // nothing changed this second — skip the repaint/broadcast
@@ -3610,7 +3791,12 @@ setInterval(() => {
 }, 1000);
 // don't count time spent on another tab/app: reset the accrual marker on visibility flips
 // (hidden → pause; visible → restart the slice from now, so no away-time jumps in).
-document.addEventListener("visibilitychange", () => { playTickAt = document.hidden ? 0 : Date.now(); });
+document.addEventListener("visibilitychange", () => {
+  playTickAt = document.hidden ? 0 : Date.now();
+  if (document.hidden) recordPlayFlush();   // tab hidden → flush any pending debounced play-log write before we might be frozen/closed
+});
+// last-ditch flush on unload so an in-progress row isn't lost if the tab closes within the debounce window
+window.addEventListener("pagehide", () => recordPlayFlush());
 
 /* ===========================================================================
    MULTIPLAYER (mp) — realtime co-op + versus over Supabase Realtime.
@@ -3817,7 +4003,9 @@ const mp = {
   // Letters tier also carries its purchase count + the PINNED per-word reveal mask, so the
   // teammate's title lights the exact same letters (and they don't re-flow on either side).
   broadcastHint(tier) {
-    const extra = (tier === "first_letter") ? { letters: lettersRevealed, litMask: letterLitsSnapshot() } : {};
+    const extra = (tier === "first_letter") ? { letters: lettersRevealed, litMask: letterLitsSnapshot() }
+                : (tier === "synonym") ? { synonymWords }   // share the locked hidden-word count so the cost is identical for every teammate
+                : {};
     this.send("hint", { tier, packet: hints, by: mpName(), ...extra });
   },
 
@@ -3903,7 +4091,7 @@ const mp = {
     this._incomingBy = null;
     hintsLeft--; updateRevealBtn(); refreshMeta();
   },
-  _applyRemoteHint({ tier, packet, letters, litMask }) {
+  _applyRemoteHint({ tier, packet, letters, litMask, synonymWords: synWords }) {
     if (!this.active) return;
     if (packet) hints = { ...(hints || EMPTY_HINTS), ...packet };
     if (tier === "source") fandomUsed = true;
@@ -3920,7 +4108,12 @@ const mp = {
       if (!firstSentenceUsed) { firstSentenceWords = paintFirstSentenceTokens(); firstSentenceUsed = true; }
       if (!hintTiers.includes("first_sentence")) hintTiers.push("first_sentence");
       summaryUsed = true;
-    } else if (tier && !hintTiers.includes(tier)) { hintTiers.push(tier); summaryUsed = true; }
+    } else if (tier && !hintTiers.includes(tier)) {
+      hintTiers.push(tier); summaryUsed = true;
+      // synonym is priced per still-hidden title word — adopt the sender's locked count so every
+      // teammate is charged the same (fall back to our own board if an older peer sent none).
+      if (tier === "synonym") synonymWords = (typeof synWords === "number") ? synWords : synonymHiddenCount();
+    }
     saveDailyState(); renderHints();
   },
   _applyStart(startAt) {
@@ -3939,6 +4132,7 @@ const mp = {
       guesses: (guesses || []).map(g => ({ key: norm(g.word), raw: g.word, hint: !!g.hint, by: g.by || null })),
       hintsLeft, hints, hintTiers: (hintTiers || []).slice(), fandomUsed: !!fandomUsed, sourceFree: !!sourceFree,
       lettersRevealed: lettersRevealed || 0, letterLits: letterLitsSnapshot(), firstSentenceUsed: !!firstSentenceUsed,
+      synonymWords: synonymWords || 0,
     });
   },
   _applySync(payload) {
@@ -3961,6 +4155,7 @@ const mp = {
     if (Array.isArray(payload.letterLits)) applyLetterLits(payload.letterLits, true);
     else if (lettersRevealed > 0) distributeLettersFallback(lettersRevealed);
     if (payload.firstSentenceUsed && !firstSentenceUsed) { firstSentenceWords = paintFirstSentenceTokens(); firstSentenceUsed = true; }
+    if (hintTiers.includes("synonym")) synonymWords = (typeof payload.synonymWords === "number") ? payload.synonymWords : synonymHiddenCount();
     if (lettersRevealed > 0 && !solved && !gaveUp) drawTitle();   // lay the synced letters over the title
     updateRevealBtn(); refreshMeta(); renderHints();
   },

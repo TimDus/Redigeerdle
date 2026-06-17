@@ -553,6 +553,58 @@ test("daily feed lists the followed fandoms' dailies and highlights the loaded o
   await expect(cards.filter({ hasText: "Harry Potter" })).toBeVisible();
 });
 
+test("Archive: past dailies list under the feed — featured rows stay neutral, fandom rows named", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("redigeerdle:follows",
+    JSON.stringify(["harrypotter.fandom.com", "zelda.fandom.com"])));
+  await page.route("**/functions/v1/**", r =>
+    r.fulfill({ status: 200, contentType: "application/json", body: '{"summary":""}' }));
+  await page.route("**/auth/v1/**", r => r.fulfill({ status: 200, contentType: "application/json", body: "{}" }));
+  await page.route("**/rest/v1/follows**", r => r.fulfill({ status: 200, contentType: "application/json", body: "[]" }));
+  await page.route("**/rest/v1/wikis**", r =>
+    r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([
+      { host: "harrypotter.fandom.com", display_name: "Harry Potter", icon: "🧙" },
+      { host: "zelda.fandom.com", display_name: "The Legend of Zelda", icon: "🛡️" },
+    ]) }));
+  const featured = { id: "today:harrypotter.fandom.com", date: "2026-06-17",
+    wiki: "harrypotter.fandom.com", revision_id: 2006074, is_featured: true };
+  // PAST dailies the Archive query (date=lt.) returns: a featured one on a secret wiki, and a
+  // followed-fandom one. The featured row must render NEUTRALLY (never its wiki name).
+  const archiveRows = [
+    { id: "2026-06-14:secretwiki.fandom.com", date: "2026-06-14", wiki: "secretwiki.fandom.com", revision_id: 111, is_featured: true },
+    { id: "2026-06-13:zelda.fandom.com", date: "2026-06-13", wiki: "zelda.fandom.com", revision_id: 1004112, is_featured: false },
+  ];
+  await page.route("**/rest/v1/puzzles**", r => {
+    const url = r.request().url();
+    if (url.includes("date=lt."))                                   // ARCHIVE query (past dailies)
+      return r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(archiveRows) });
+    if (url.includes("is_featured"))                                // home featured (latestPointer)
+      return r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([featured]) });
+    return r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([featured]) });  // today's feed
+  });
+  await page.goto("/");
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+  await page.click("#feedBtn");
+  await expect(page.locator("#feed")).toHaveClass(/open/);
+
+  // the Archive section appears and is collapsed by default
+  const archive = page.locator(".feed-archive");
+  await expect(archive).toBeVisible();
+  await expect(archive.locator("summary")).toContainText("Past dailies");
+  await expect(archive.locator("summary")).toContainText("2");        // both past rows
+  // expand it
+  await archive.locator("summary").click();
+  const arch = archive.locator(".archcard");
+  await expect(arch).toHaveCount(2);
+  // the featured past daily is NEUTRAL — "Featured daily", never its real wiki ("secretwiki")
+  await expect(arch.filter({ hasText: "Featured daily" })).toHaveCount(1);
+  await expect(archive).not.toContainText("secretwiki");
+  // the followed fandom past daily is named, shows its date, and is a clickable button
+  const zeldaPast = arch.filter({ hasText: "The Legend of Zelda" });
+  await expect(zeldaPast).toHaveCount(1);
+  await expect(zeldaPast).toContainText("Jun 13");
+  await expect(zeldaPast).toHaveJSProperty("tagName", "BUTTON");
+});
+
 test("Settings: the homepage-daily picker lists 'Featured daily' + followed fandoms and persists the choice", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("redigeerdle:follows",
     JSON.stringify(["harrypotter.fandom.com", "zelda.fandom.com"])));

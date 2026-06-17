@@ -256,7 +256,8 @@ test("the Invite button turns the article you're playing into a co-op room", asy
   await beReal(page);
   await loadHP(page);
 
-  // while playing a custom article the Invite (co-op) button is offered…
+  // while playing a custom article the Invite (co-op) button is offered… (in the Social popup)
+  await page.click("#socialBtn");
   await expect(page.locator("#inviteBtn")).toBeVisible();
   await page.click("#inviteBtn");
   expect(await page.evaluate(() => mp.active)).toBe(true);
