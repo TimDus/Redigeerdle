@@ -591,18 +591,26 @@ test("Archive: past dailies list under the feed — featured rows stay neutral, 
   await expect(archive).toBeVisible();
   await expect(archive.locator("summary")).toContainText("Past dailies");
   await expect(archive.locator("summary")).toContainText("2");        // both past rows
-  // expand it
+  // expand it — now ONE row per fandom (not per daily), each opening a date popup
   await archive.locator("summary").click();
   const arch = archive.locator(".archcard");
-  await expect(arch).toHaveCount(2);
-  // the featured past daily is NEUTRAL — "Featured daily", never its real wiki ("secretwiki")
+  await expect(arch).toHaveCount(2);   // 2 fandoms: the featured pseudo-source + Zelda
+  // the featured group is NEUTRAL — "Featured daily", never its real wiki ("secretwiki")
   await expect(arch.filter({ hasText: "Featured daily" })).toHaveCount(1);
   await expect(archive).not.toContainText("secretwiki");
-  // the followed fandom past daily is named, shows its date, and is a clickable button
-  const zeldaPast = arch.filter({ hasText: "The Legend of Zelda" });
-  await expect(zeldaPast).toHaveCount(1);
-  await expect(zeldaPast).toContainText("Jun 13");
-  await expect(zeldaPast).toHaveJSProperty("tagName", "BUTTON");
+  // the followed fandom group is named, shows its count, and is a clickable button.
+  // The DATE moved into the popup, so it's NOT on the row.
+  const zeldaRow = arch.filter({ hasText: "The Legend of Zelda" });
+  await expect(zeldaRow).toHaveCount(1);
+  await expect(zeldaRow).not.toContainText("Jun 13");
+  await expect(zeldaRow).toHaveJSProperty("tagName", "BUTTON");
+  // clicking the fandom opens the popup with its dates as condensed chips
+  await zeldaRow.click();
+  await expect(page.locator("#archivemodal")).toHaveClass(/open/);
+  await expect(page.locator("#archiveModalTitle")).toHaveText("The Legend of Zelda");
+  const chips = page.locator("#archiveModalBody .archdate");
+  await expect(chips).toHaveCount(1);
+  await expect(chips.first()).toContainText("Jun 13");
 });
 
 test("Settings: the homepage-daily picker lists 'Featured daily' + followed fandoms and persists the choice", async ({ page }) => {

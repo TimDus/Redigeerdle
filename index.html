@@ -200,6 +200,7 @@
   #socialBtn { display:inline-block; }   /* Share + Invite collapse behind it on every width (placeSocial) */
   #socialModalBody { display:flex; flex-direction:column; gap:10px; }
   #socialModalBody button { display:block; width:100%; }
+  #socialModalBody button[hidden] { display:none; }   /* else display:block above overrides the `hidden` attr — Invite must vanish when solved/in a room */
   #article { grid-area:article; }
   /* the controls column follows you down the page as the (taller) article scrolls —
      pinned directly below the sticky top bar. --header-h is the top bar's full rendered
@@ -404,6 +405,12 @@
   .feed-archive > summary:hover, .feed-archive[open] > summary { color:var(--ink); }
   .feed-archive .feedcard { margin-top:5px; }
   .archcard .fc-status { color:var(--muted); font-weight:400; font-size:.72rem; white-space:nowrap; }
+  /* archive popup: a condensed wrap-grid of date chips for the picked fandom */
+  #archiveModalBody { display:flex; flex-wrap:wrap; gap:6px; }
+  .archdate { font-family:var(--mono); font-size:.74rem; padding:5px 9px; border:1px solid var(--line); background:var(--surface); color:var(--ink); cursor:pointer; white-space:nowrap; }
+  .archdate:hover { border-color:var(--ink); background:var(--paper); }
+  .archdate.done { color:var(--muted); }
+  .archdate.active { border-color:var(--classified); box-shadow:inset 0 0 0 1px var(--classified); }
   /* mobile-only quick actions pinned at the bottom of the drawer (New game /
      Settings / How to play). On desktop these live in the header, so hidden here. */
   .feed-actions { display:none; flex:0 0 auto; }
@@ -614,6 +621,15 @@
       <button class="modal-x" id="socialClose" aria-label="Close">&times;</button>
       <h2 class="modal-title">Social</h2>
       <div id="socialModalBody"></div>
+    </div>
+  </div>
+
+  <!-- archive popup: the past dailies for ONE picked fandom, as condensed date chips -->
+  <div class="modal" id="archivemodal" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-label="Past dailies">
+      <button class="modal-x" id="archiveClose" aria-label="Close">&times;</button>
+      <h2 class="modal-title" id="archiveModalTitle">Past dailies</h2>
+      <div id="archiveModalBody"></div>
     </div>
   </div>
 
@@ -1500,7 +1516,7 @@ function addTier(key) {
   if (isNew) hintTiers.push(key);
   // synonym is priced per still-hidden title word — LOCK that count at purchase (first add only)
   // so a later title-word guess can't retroactively cheapen the hint you already received.
-  if (key === "synonym" && isNew) synonymWords = synonymHiddenCount();
+  if (key === "synonym" && isNew) synonymWords = synonymChargeCount();   // names (empty synonym) don't count toward the charge — see synonymChargeCount
   summaryUsed = true;
   saveDailyState();
   renderHints();
@@ -1747,6 +1763,7 @@ async function loadArticle(apiBase, wikiLabel, parseParams, opts = {}) {
   const realTitle = parsed.parse.title;
   if (opts.requireCleanTitle && badTitle(realTitle)) throw new Error("skip: unsuitable title");
   const revid = parsed.parse.revid;
+  articlePageId = parsed.parse.pageid != null ? parsed.parse.pageid : null;   // stable hint_cache key
   const rawHtml = parsed.parse.text;
   const blocks = extractBlocks(typeof rawHtml === "string" ? rawHtml : rawHtml["*"]);
   const totalChars = blocks.reduce((n, b) => n + b.text.length, 0);
@@ -1827,7 +1844,10 @@ async function fetchAndApplyHint(title, blocks) {
   const p = (async () => {
     try {
       const text = blocks.map(b => b.text).join("\n\n").slice(0, HINT_EXCERPT_CHARS);
-      const { data, error } = await supa.functions.invoke("hint", { body: { title, text, categories: articleCategories } });
+      // wiki+revisionId+pageId let the fn reuse / seed the shared hint_cache (keyed by the
+      // stable page_id); it re-derives the authoritative title from wiki+rev before caching.
+      const { data, error } = await supa.functions.invoke("hint",
+        { body: { title, text, categories: articleCategories, wiki: currentShare.wiki, revisionId: currentShare.rev, pageId: articlePageId } });
       if (error || !data || !data.summary || solved) return;
       hints = parseHintPacket(data.summary) || hints;
     } catch { /* no hint available — fine */ }
@@ -2280,6 +2300,22 @@ function letterCost(k) { k = k || 0; return k * SCORE.letterBase + SCORE.letterS
 // Live for the displayed price (drops as you guess title words); locked into synonymWords at
 // purchase for the score — exactly like the first-sentence tier.
 function synonymHiddenCount() { return (titleKeyWords || []).filter(t => !t.revealed).length; }
+// What the synonym tier is actually CHARGED for: still-hidden non-stop words that get a real
+// synonym, EXCLUDING undecodable names (empty array entry → rendered as italic "Name", reveals
+// nothing). Names mustn't push the price up — but nextRevealCost still shows the full
+// synonymHiddenCount() so the buy-price can't betray which/how many words are names.
+function synonymChargeCount() {
+  const arr = hints && hints.synonyms;
+  if (!Array.isArray(arr) || !arr.length) return synonymHiddenCount();   // legacy/combined synonym: no per-word names to exclude
+  let j = 0, n = 0;
+  (titleToks || []).forEach(t => {
+    if (t.sep !== undefined) return;
+    const real = !!String(arr[j] || "").trim();   // same alignment + emptiness test as buildSynonymValue
+    j++;
+    if (!t.stop && !t.revealed && real) n++;
+  });
+  return n;
+}
 // did the Source tier count as a PAID hint? It's shown (fandomUsed) but free — not scored,
 // not in the share breakdown, not logged as source_used — when the player chose this fandom
 // (sourceFree). Used everywhere the source is treated as "a hint the player spent".
@@ -2675,44 +2711,74 @@ async function renderFeed() {
   cards.appendChild(none);
 
   // ---- Archive: a collapsible list of PAST dailies (personal stats only — never the
-  // leaderboard, see archivePlay). Native <details> so it's closed by default and costs no JS. ----
+  // leaderboard, see archivePlay). Native <details> so it's closed by default and costs no JS.
+  // One row PER FANDOM (not per daily); clicking a fandom opens a popup of its dates. ----
   if (archive.length) {
+    // group by source: featured dailies fold into the neutral "⭐ Featured daily" pseudo-source
+    // (the source is a paid hint — never name the featured wiki); followed fandoms group by wiki.
+    const groups = new Map();
+    archive.forEach(p => {
+      const key = p.is_featured ? "__featured__" : p.wiki;
+      let g = groups.get(key);
+      if (!g) { g = { featured: !!p.is_featured, host: p.wiki, items: [] }; groups.set(key, g); }
+      g.items.push(p);
+    });
     const det = document.createElement("details"); det.className = "feed-archive";
     const sum = document.createElement("summary"); sum.textContent = "📅 Past dailies (" + archive.length + ")";
     det.appendChild(sum);
-    archive.forEach(p => det.appendChild(buildArchiveCard(p, byHost)));
+    groups.forEach(g => det.appendChild(buildArchiveGroupRow(g, byHost)));
     cards.appendChild(det);
   }
   filterFeedCards();   // re-apply any active filter to the fresh cards (Archive cards live in <details>, excluded)
 }
 
-// one Archive row: a past daily. Featured rows stay NEUTRAL ("⭐ Featured daily" — the source
-// is a paid hint); a followed fandom's row shows its name/icon. Click loads it as an archive
-// play (revealFandom for the named fandom rows; the featured one stays hidden).
-function buildArchiveCard(p, byHost) {
+// archive: one row per FANDOM. Featured stays NEUTRAL ("⭐ Featured daily" — the source is a
+// paid hint); a followed fandom shows its name/icon. The status shows the daily count; clicking
+// opens the condensed date-chip popup (openArchiveModal).
+function buildArchiveGroupRow(g, byHost) {
   const card = document.createElement("button");
   card.className = "feedcard archcard";
-  if (p.id === dailyPuzzleId) card.classList.add("active");
   let name;
-  if (p.is_featured) {
+  if (g.featured) {
     const icon = document.createElement("span"); icon.className = "ficon"; icon.textContent = "⭐"; card.appendChild(icon);
     name = "Featured daily";
   } else {
-    const w = byHost.get(p.wiki);
-    const icon = wikiIconNode((w && w.icon) || faviconFor(p.wiki)); if (icon) card.appendChild(icon);
-    name = w ? wikiLabel(w) : labelForHost(p.wiki);
+    const w = byHost.get(g.host);
+    const icon = wikiIconNode((w && w.icon) || faviconFor(g.host)); if (icon) card.appendChild(icon);
+    name = w ? wikiLabel(w) : labelForHost(g.host);
   }
+  if (g.items.some(p => p.id === dailyPuzzleId)) card.classList.add("active");
   const nm = document.createElement("span"); nm.className = "fc-name"; nm.textContent = name; card.appendChild(nm);
-  const st = document.createElement("span"); st.className = "fc-status";
-  const s = readDailyState(p.id);
-  let glyph = "";
-  if (s && s.solved) { glyph = "✓"; card.classList.add("done"); }
-  else if (s && s.gaveUp) { glyph = "✗"; card.classList.add("done"); }
-  else if (s && Array.isArray(s.guesses) && s.guesses.length) glyph = "…";
-  st.textContent = shortDate(p.date) + (glyph ? " " + glyph : "");
-  card.appendChild(st);
-  card.addEventListener("click", () => { closeFeed(); loadPuzzlePointer(p, { revealFandom: !p.is_featured, archive: true }).then(renderFeed); });
+  const st = document.createElement("span"); st.className = "fc-status"; st.textContent = g.items.length; card.appendChild(st);
+  card.addEventListener("click", () => openArchiveModal(g, name));
   return card;
+}
+
+// the archive popup: a fandom's past dailies as condensed date chips (date + a small status
+// glyph). Clicking a date loads it as an archive play (revealFandom for named fandoms; the
+// featured one stays hidden — it's a paid hint).
+function openArchiveModal(g, name) {
+  document.getElementById("archiveModalTitle").textContent = name;
+  const body = document.getElementById("archiveModalBody");
+  body.textContent = "";
+  g.items.forEach(p => {
+    const chip = document.createElement("button");
+    chip.className = "archdate";
+    if (p.id === dailyPuzzleId) chip.classList.add("active");
+    const s = readDailyState(p.id);
+    let glyph = "";
+    if (s && s.solved) { glyph = " ✓"; chip.classList.add("done"); }
+    else if (s && s.gaveUp) { glyph = " ✗"; chip.classList.add("done"); }
+    else if (s && Array.isArray(s.guesses) && s.guesses.length) glyph = " …";
+    chip.textContent = shortDate(p.date) + glyph;
+    chip.addEventListener("click", () => {
+      document.getElementById("archivemodal").classList.remove("open");
+      closeFeed();
+      loadPuzzlePointer(p, { revealFandom: !p.is_featured, archive: true }).then(renderFeed);
+    });
+    body.appendChild(chip);
+  });
+  document.getElementById("archivemodal").classList.add("open");
 }
 
 /* ---- load the daily puzzle: Supabase first, puzzle.json as fallback ----
@@ -2724,6 +2790,7 @@ let dailyFeatured = false;  // is the loaded daily the home-page "featured" one?
 let archivePlay = false;    // loaded from the Archive (a PAST daily) — counts in personal stats but NOT the competitive `scores` leaderboard, and doesn't hijack the boot resume
 let articleText = "";       // plain body text of the loaded article, for lazy hints
 let articleCategories = [];  // the loaded page's visible wiki categories (the "in:" bar) — Groq bases the Category hint on these
+let articlePageId = null;    // the loaded page's STABLE MediaWiki page_id — the hint_cache key (survives renames/edits); sent so the hint fn can reuse a cached packet
 // how much article prose to send the hint LLM. Bumped from 1500 once Gemini became primary
 // (1M TPM / no daily-token cap) — more context → better category/summary/synonym fits. The
 // Edge function re-caps to the same bound server-side. (Groq fallback's 12K TPM still fits.)
@@ -3581,6 +3648,11 @@ document.getElementById("socialClose").addEventListener("click", () => document.
 document.getElementById("socialmodal").addEventListener("click", e => {
   if (e.target.id === "socialmodal" || e.target.closest("button#shareBtn, button#inviteBtn")) e.currentTarget.classList.remove("open");
 });
+// archive popup (past dailies for one fandom): ✕ + backdrop close it
+document.getElementById("archiveClose").addEventListener("click", () => document.getElementById("archivemodal").classList.remove("open"));
+document.getElementById("archivemodal").addEventListener("click", e => {
+  if (e.target.id === "archivemodal") e.currentTarget.classList.remove("open");
+});
 // mobile drawer quick actions: close the drawer, then trigger the same action as the
 // (hidden-on-mobile) header buttons. New game / Settings / How to play.
 document.getElementById("feedNewBtn").addEventListener("click", () => { closeFeed(); openMenu(); });
@@ -3635,6 +3707,7 @@ document.addEventListener("keydown", e => {
   document.getElementById("helpmodal").classList.remove("open");
   document.getElementById("hintsmodal").classList.remove("open");
   document.getElementById("socialmodal").classList.remove("open");
+  document.getElementById("archivemodal").classList.remove("open");
   document.getElementById("authmodal").classList.remove("open");
   closeMetrics();
   closeStats();

@@ -242,6 +242,19 @@ test("synonym cost excludes already-guessed title words (prices per STILL-HIDDEN
   await expect(page.locator("#scoreVal")).toHaveText("25");   // synonym +25; the correct title guess was free
 });
 
+test("synonym cost: an undecodable name is free, but the buy-price still hides which word is a name", async ({ page }) => {
+  // "Golden Snitch": Golden -> "glittering", Snitch -> "" (an undecodable name → italic "Name").
+  // The name reveals nothing, so it must NOT add to the charge — but the displayed buy-price
+  // still counts BOTH words so it can't betray that Snitch is a name.
+  await page.evaluate(() => { hints = { category: "", summary: "", synonyms: ["glittering", ""], first_letter: "" }; });
+  await page.click("#hintsBtn");
+  const btn = page.locator('.hint-tier[data-tier="synonym"] .hint-reveal');
+  await expect(btn).toContainText("+50");        // displayed: BOTH hidden words × 25 — no leak that Snitch is a name
+  await btn.click();
+  await page.evaluate(() => { playActiveMs = 0; playTickAt = 0; updateScore(); });
+  await expect(page.locator("#scoreVal")).toHaveText("25");   // charged: only the decoded word (Golden) counts; the name is free
+});
+
 test("title-progress pill tracks title words found and flags completion", async ({ page }) => {
   // "Golden Snitch" = 2 non-stop title words → the win condition is finding both
   await expect(page.locator("#titleProgress")).toBeVisible();

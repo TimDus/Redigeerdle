@@ -104,9 +104,35 @@ a standalone Node script run by GitHub Actions.
   (Gemini→Groq, above) and writes the result back to `puzzles.summary`. Concurrent first-clickers are de-duped by
   an **atomic claim** on `puzzles.summary_generating_at` (`UPDATE … WHERE summary IS NULL
   AND the claim is free/stale`); the loser gets `status:"pending"` and the client polls.
-  Random/custom games call the same function with no `puzzleId` → generate, no cache; for these
+  Random/custom games call the same function with no `puzzleId`; for these
   the packet is fetched **in the background** at article load (`fetchAndApplyHint`, tracked as the
-  `hintFetch` promise). If the player reveals an AI tier **while that fetch is still in flight**
+  `hintFetch` promise).
+  - **Cross-puzzle hint cache — `hint_cache`, keyed by `(wiki_host, page_id)`.** A
+    MediaWiki **`page_id`** is the article's *stable* identity: it survives renames, moves and
+    heavy edits (only delete+recreate mints a new one) — unlike `revision_id` (changes every
+    edit; still the **content pin**) or the title (the answer + changes on rename). So the LLM
+    packet for an article is generated **once and reused forever after** — across dailies on
+    different dates, archived-daily replays, and (popular/curated) random games for the same
+    page — instead of re-hitting the rate-limited LLM. The Edge Function (`readCache`/
+    `writeCache`, [supabase/functions/hint/index.ts](supabase/functions/hint/index.ts)) checks
+    `hint_cache` before generating and seeds it after, on **both** paths. **`puzzles.summary`
+    still fronts it per-puzzle** — a daily that already generated never looks here again; the
+    cache only pays off on the *first* generation for each article. **Staleness guard:** a
+    cached packet older than `CACHE_STALE_MS` (**180d**) is treated as a miss and regenerated,
+    so a substantially-rewritten page eventually refreshes. **Anti-poisoning:** because dailies
+    read this shared cache too, the packet is always generated from the **server-derived**
+    authoritative title (`fetchPageInfo(wiki, revisionId)` — one query yielding `{title,
+    pageId}`) and stored under the **server-derived** `page_id`, never the caller's. The
+    caller-supplied `pageId` is used **only as a fast read-probe** (harmless if wrong: packets
+    are leak-filtered, a bad key just misses). The client sends `wiki`+`revisionId`+`pageId`
+    (from `parse.pageid`) on the no-`puzzleId` path; the daily path derives everything from the
+    puzzle row. If the derive fails (network), the fn still generates from the caller title but
+    **skips caching** (degrade without poisoning). The table is **RLS-on, no-policy** (like
+    `picked`): only the fn's `service_role` touches it; the browser always gets hints *through*
+    the fn. Migration
+    [20260618120000_add_hint_cache.sql](supabase/migrations/20260618120000_add_hint_cache.sql) —
+    **push before deploying the updated function/client** (both degrade gracefully if it's
+    missing, but cache benefit waits on it). If the player reveals an AI tier **while that fetch is still in flight**
   (Gemini can take several seconds), `revealTier` shows the **"Generating hint…"** state and
   **awaits `hintFetch`** rather than flashing the "(no … for this puzzle)" placeholder — the
   placeholder only appears once the packet has genuinely landed empty. (`haveTierData(key)` is the
@@ -249,6 +275,15 @@ dynamically, all on the same "per still-hidden word, locked at purchase" model:
   into `synonymWords` (so a later title-word guess can't retroactively cheapen a hint you already
   got). A 2-word title with none guessed ≈ the old flat `+50`. Locked in `addTier` (and in the
   co-op `_applyRemoteHint`/`_applySync` from the sender's value, so every teammate pays the same).
+  **An undecodable NAME is free**: a word whose synonym entry is empty (`""`, rendered as italic
+  "Name") reveals nothing, so it must not add to the charge. The two counts deliberately
+  **diverge**: the **displayed buy-price** keeps using `synonymHiddenCount()` (ALL still-hidden
+  non-stop words) so the price **can't betray which/how many words are names** (a leak in itself);
+  the **locked/charged** `synonymWords` uses `synonymChargeCount()`, which excludes the empty-entry
+  names (same alignment + emptiness test as `buildSynonymValue`). So the score can go up by less
+  than the button quoted — fine, since once revealed the player can see the "Name" slots anyway.
+  (Legacy/combined-synonym packets have no per-word names → `synonymChargeCount` falls back to the
+  full `synonymHiddenCount`.)
 - the **first-sentence** tier is `firstSentencePer` (`+3`)
   **per still-hidden word it uncovers** (`firstSentenceBase` is `0`), locked at purchase in
   `firstSentenceWords` (its live panel price drops by 3 as you guess words in the sentence).
@@ -1133,17 +1168,23 @@ anonymous auth**. This needs **"Allow anonymous sign-ins" enabled in the dashboa
 
 A **"Past dailies"** list lets a player play/replay days they missed. It's a collapsible
 native `<details class="feed-archive">` at the bottom of the **feed drawer**, built in
-`renderFeed()` → `buildArchiveCard()`.
+`renderFeed()` → `buildArchiveGroupRow()`. **One row PER FANDOM** (not per daily — that got
+unwieldy): the dailies are grouped by source (featured ones fold into the neutral
+"⭐ Featured daily" pseudo-source, followed fandoms group by `wiki`), each row showing the
+fandom name + its daily count. Clicking a row opens **`openArchiveModal()`** — the
+`#archivemodal` popup (standard `.modal` pattern: ✕ / backdrop / Esc) listing that fandom's
+dailies as **condensed date chips** (`.archdate` — the date + a small ✓/✗/… status glyph,
+wrap-grid). Clicking a date loads it (`loadPuzzlePointer`, closing both popup + drawer).
 - **Query**: one `puzzles` read for `date < today AND date >= today-30d AND (is_featured OR
   wiki in <your follows>)`, `order(date desc) limit 150`. The pinned (today/latest) featured
   row is filtered out so it isn't duplicated. Rows sort date-desc, featured-first within a date.
 - **Scope = featured + followed.** A followed fandom's archive is just a `puzzles`-by-wiki
   query, **independent of when you followed it** — so following a *new* fandom immediately
   surfaces its earlier dailies (the user's explicit ask).
-- **Privacy** (same invariant as the feed's pinned card / My-stats source selector): a
-  **featured** archive row renders NEUTRALLY ("⭐ Featured daily", never its wiki name); a
-  **followed-fandom** row shows its name/icon (you chose it). Click loads via
-  `loadPuzzlePointer(p, { revealFandom: !p.is_featured, archive: true })`.
+- **Privacy** (same invariant as the feed's pinned card / My-stats source selector): the
+  **featured** group renders NEUTRALLY ("⭐ Featured daily", never its wiki name) — both the row
+  and the popup title; a **followed-fandom** group shows its name/icon (you chose it). A date
+  chip loads via `loadPuzzlePointer(p, { revealFandom: !p.is_featured, archive: true })`.
 - **Scoring/resume — the `archivePlay` flag.** Set in `loadArticle`'s daily branch from
   `opts.archive` (threaded by `loadPuzzlePointer`), reset in `initGame`. It gates two things:
   `submitScore()` early-returns (a back-dated featured solve must **never** hit the competitive

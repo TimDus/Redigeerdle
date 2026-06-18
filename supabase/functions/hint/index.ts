@@ -58,13 +58,15 @@ function adminClient() {
   return url && key ? createClient(url, key) : null;
 }
 
-// Re-derive a daily's REAL title from its pinned revision (wiki + revision_id), reading
-// it straight from MediaWiki. The answer is never stored server-side, so for the cached
-// daily path we read it authoritatively here instead of trusting the caller's `title` —
-// otherwise anyone could POST a real puzzleId with a bogus title/excerpt and poison the
-// shared `puzzles.summary` for every player. Returns null if it can't be fetched (we then
-// fall back to the caller's title, so the feature still degrades gracefully).
-async function fetchTitleAtRevision(wiki: string, revisionId: number | string): Promise<string | null> {
+// Re-derive an article's AUTHORITATIVE identity — its real title AND its stable page_id —
+// from a pinned revision (wiki + revision_id), reading it straight from MediaWiki. The
+// answer is never stored server-side, so for any path that writes to a SHARED cache we
+// resolve the title here instead of trusting the caller's `title` — otherwise anyone could
+// POST a bogus title/excerpt and poison puzzles.summary / hint_cache for every player. The
+// page_id is the stable hint_cache key (survives renames/edits). One query returns both
+// (query.pages[].title + .pageid). Returns null if it can't be fetched (callers then fall
+// back to the supplied title and skip caching, so the feature degrades gracefully).
+async function fetchPageInfo(wiki: string, revisionId: number | string): Promise<{ title: string; pageId: number } | null> {
   if (!wiki || !revisionId) return null;
   const host = String(wiki).replace(/^https?:\/\//, "");
   const slash = host.indexOf("/");
@@ -77,11 +79,37 @@ async function fetchTitleAtRevision(wiki: string, revisionId: number | string): 
       if (!r.ok || !((r.headers.get("content-type") || "").includes("json"))) continue;
       const j = await r.json();
       const pages = j?.query?.pages;
-      const t = Array.isArray(pages) ? pages[0]?.title : (pages && Object.values(pages)[0]?.title);
-      if (t) return String(t);
+      const p = Array.isArray(pages) ? pages[0] : (pages && Object.values(pages)[0]);
+      if (p?.title) return { title: String(p.title), pageId: Number(p.pageid) };
     } catch { /* try the next candidate endpoint */ }
   }
   return null;
+}
+
+// ---- hint_cache: long-lived, cross-puzzle hint store keyed by (wiki_host, page_id) ----
+// The page_id is the article's STABLE identity (survives renames/edits/moves), so a hint
+// generated once is reused forever — across dailies on different dates, archived replays
+// and (popular) random games for the same page — saving the rate-limited LLM call. The
+// stored `packet` is the same leak-filtered JSON string as puzzles.summary (no title).
+const CACHE_STALE_MS = 180 * 24 * 60 * 60 * 1000;   // packets older than this → regenerate (handle heavily-rewritten pages)
+
+async function readCache(admin, wikiHost: string, pageId: number): Promise<string | null> {
+  if (!admin || !wikiHost || pageId == null || Number.isNaN(pageId)) return null;
+  try {
+    const { data } = await admin.from("hint_cache").select("packet, updated_at")
+      .eq("wiki_host", wikiHost).eq("page_id", pageId).maybeSingle();
+    if (!data?.packet) return null;
+    if (Date.now() - new Date(data.updated_at).getTime() > CACHE_STALE_MS) return null;   // stale → treat as a miss
+    return data.packet;
+  } catch { return null; }   // table missing / DB error → just a cache miss
+}
+
+async function writeCache(admin, wikiHost: string, pageId: number, packet: string): Promise<void> {
+  if (!admin || !wikiHost || pageId == null || Number.isNaN(pageId) || !packet) return;
+  // best-effort — a cache write must never break the response
+  await admin.from("hint_cache")
+    .upsert({ wiki_host: wikiHost, page_id: pageId, packet, updated_at: new Date().toISOString() })
+    .then(() => {}, () => {});
 }
 
 // The title's first letter — derived in code (NOT trusted to the model) so it's always
@@ -239,7 +267,7 @@ async function generate(title: string, text: string, categories: string[] = []):
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   try {
-    const { title, text, categories, puzzleId } = await req.json().catch(() => ({}));
+    const { title, text, categories, puzzleId, wiki, revisionId, pageId } = await req.json().catch(() => ({}));
     if (!title || !text) return json({ summary: "", status: "ready" });
 
     const admin = adminClient();
@@ -261,9 +289,21 @@ Deno.serve(async (req) => {
       if (!who?.user) return json({ summary: "", status: "ready" });
     }
 
-    // ---- random/custom games: no row to cache against, just generate ----
+    // ---- random/custom games: no puzzle row, but still share the cross-puzzle cache ----
     if (!puzzleId) {
-      return json({ summary: await generate(title, text, categories), status: "ready" });
+      // fast read-probe with the caller's pageId. Harmless if it's wrong/bogus: packets are
+      // leak-filtered (no title), and a bad key just misses. On a hit we touch neither
+      // MediaWiki nor the LLM — the whole point of the cache.
+      const cached = await readCache(admin, wiki, Number(pageId));
+      if (cached) return json({ summary: cached, status: "ready" });
+      // miss → derive the AUTHORITATIVE identity from (wiki, revisionId) so a poisoned caller
+      // title can't pollute the shared cache (a daily later reads it too). Generate from the
+      // derived title and cache under the real page_id. If the derive fails (network), still
+      // generate from the caller title but DON'T cache — degrade without poisoning.
+      const info = await fetchPageInfo(wiki, revisionId);
+      const hint = await generate(info?.title || title, text, categories);
+      if (hint && info) await writeCache(admin, wiki, info.pageId, hint);
+      return json({ summary: hint, status: "ready" });
     }
 
     // ---- daily: generate once and cache, race-safe via an atomic claim ----
@@ -299,10 +339,15 @@ Deno.serve(async (req) => {
       //    write-back rejecting) so a single failed attempt doesn't strand the row in
       //    "pending" for the whole 30s stale window.
       try {
-        const authTitle = await fetchTitleAtRevision(row?.wiki, row?.revision_id);
-        const hint = await generate(authTitle || title, text, categories);
+        // authoritative title + stable page_id from the pinned revision (also the cache key).
+        const info = await fetchPageInfo(row?.wiki, row?.revision_id);
+        // cross-puzzle cache: a DIFFERENT daily (another date) or a random game for the SAME
+        // article may already have generated this packet — reuse it, no LLM call.
+        let hint = info ? await readCache(admin, row?.wiki, info.pageId) : null;
+        if (!hint) hint = await generate(info?.title || title, text, categories);
         if (hint) {
           await admin.from("puzzles").update({ summary: hint }).eq("id", puzzleId);
+          if (info) await writeCache(admin, row?.wiki, info.pageId, hint);   // seed the shared cache for future puzzles
           return json({ summary: hint, status: "ready" });
         }
         // no usable hint → release the claim so a later click can retry.
