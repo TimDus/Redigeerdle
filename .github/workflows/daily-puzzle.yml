@@ -29,3 +29,11 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           # the picker no longer generates hints — the game does that lazily via the
           # "hint" Edge Function, so the Groq key lives with the function, not here.
+
+      # Hard-delete accounts whose deletion was requested >7 days ago (cancelable
+      # until then). Idempotent + runs on both cron times (the 2nd finds nothing).
+      - name: Purge accounts past the deletion grace period
+        run: node scripts/purge-deletions.mjs
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}

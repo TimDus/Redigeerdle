@@ -6,13 +6,16 @@
 <title>Redigeerdle</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%23f7f6f3'/%3E%3Crect x='2' y='6' width='12' height='4' rx='1' fill='%231a1a1a'/%3E%3C/svg%3E">
 <!-- apply the saved theme before first paint, so there's no light→dark flash -->
-<script>try{if(localStorage.getItem("redigeerdle:theme")==="dark")document.documentElement.classList.add("dark");}catch(e){}</script>
+<script>try{var d=document.documentElement,t=localStorage.getItem("redigeerdle:theme"),m=localStorage.getItem("redigeerdle:motion");if(t==="dark"||((!t||t==="system")&&matchMedia("(prefers-color-scheme: dark)").matches))d.classList.add("dark");if(localStorage.getItem("redigeerdle:cb")==="1")d.classList.add("cb");if(m==="reduced"||((!m||m==="system")&&matchMedia("(prefers-reduced-motion: reduce)").matches))d.classList.add("reduce-motion");}catch(e){}</script>
 <style>
   :root {
     --paper:#f7f6f3; --ink:#1a1a1a; --bar:#1a1a1a; --classified:#c1361f;
     --marker:#ffd23f; --muted:#6b6b66; --line:#d8d6cf;
     /* card/input surface (was hardcoded #fff) + the hint box tint — themed so dark mode can recolour them */
     --surface:#fff; --hintbg:#fffbe6;
+    /* semantic success/fail colours (title-word hit, heatmap solved/missed). The
+       colour-blind toggle (html.cb) swaps these to an Okabe-Ito-safe blue/orange pair. */
+    --good:#1f9d55; --bad:var(--classified);
     --mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
     --serif:Georgia,"Times New Roman",serif;
   }
@@ -22,6 +25,14 @@
     --marker:#ffd23f; --muted:#9d988c; --line:#3a382f;
     --surface:#26241d; --hintbg:#2c2814;
   }
+  /* colour-blind friendly: green→blue, red→orange (distinguishable for all common CVD) */
+  html.cb { --good:#0072b2; --bad:#e8730c; }
+  /* reduced motion: no drawer/topbar slide, no smooth scroll (the JS scrolls check the same
+     html.reduce-motion class via scrollMotion()). Set by the Motion pref (normal/reduced/
+     system); "system" mirrors prefers-reduced-motion. Colour-fade flashes are kept — not
+     motion, and flashKey relies on the fade-out to clear the highlight. */
+  html.reduce-motion { scroll-behavior:auto; }
+  html.reduce-motion .topbar, html.reduce-motion .feedpanel { transition:none !important; }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--paper); color:var(--ink); font-family:var(--serif); line-height:1.7; }
   .wrap { max-width:1500px; margin:0 auto; padding:0 20px 40px; }
@@ -46,6 +57,9 @@
 
   .brand { display:flex; align-items:center; gap:8px 14px; flex-wrap:wrap; width:100%; max-width:1500px; padding:0 20px; box-sizing:border-box; }
   .controls { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  #optionsBtn { display:none; }   /* mobile-only — replaces Sign in/out in the header (see the ≤640px block) */
+  .optmenu { display:flex; flex-direction:column; gap:8px; }
+  .optmenu button { width:100%; }
   .ghost.active { background:var(--ink); color:var(--paper); }
   .controls .who { font-family:var(--mono); font-size:.75rem; color:var(--muted); margin-left:4px; }
   .controls .who b { color:var(--ink); }
@@ -53,7 +67,8 @@
   .modebtn { background:var(--paper); color:var(--ink); }
   .modebtn.active { background:var(--ink); color:var(--paper); }
   .ghost { background:var(--paper); color:var(--ink); }
-  .iconbtn { display:inline-flex; align-items:center; justify-content:center; padding:7px 11px; background:var(--paper); color:var(--ink); }
+  .iconbtn { display:inline-flex; align-items:center; justify-content:center; gap:7px; padding:7px 11px; background:var(--paper); color:var(--ink); }
+  .feedbtn-label { font-family:var(--mono); font-weight:700; font-size:.66rem; text-transform:uppercase; letter-spacing:.08em; }
   .iconbtn.active { background:var(--ink); color:var(--paper); }
   /* The brand (title + New game + How to play) is centred to a 1500px column (same as
      .wrap) so it lines up above the article; the hamburger and controls are pinned to
@@ -87,9 +102,13 @@
     .brand { justify-self:center; min-width:0; flex-wrap:nowrap; gap:0; }
     .brand #newBtn, .brand #helpBtn { display:none; }
     header > .controls { justify-self:end; flex-wrap:nowrap; }
-    .controls #settingsBtn, .controls #statsBtn, .controls .who { display:none; }
+    /* mobile header: collapse the utility + auth buttons behind one "Options" menu */
+    .controls #settingsBtn, .controls #statsBtn, .controls #alsoBtn, .controls .who,
+    .controls #authToggle, .controls #signOutBtn { display:none; }
+    .controls #optionsBtn { display:inline-block; }
     .controls button { white-space:nowrap; padding:5px 9px; font-size:.66rem; }
     .iconbtn { padding:6px 8px; }
+    .feedbtn-label { display:none; }   /* tight mobile header: icon only, drawer says "Your daily feed" */
     h1 { font-size:1.15rem; letter-spacing:.12em; white-space:nowrap; }
   }
   /* new-game modal */
@@ -106,11 +125,18 @@
   .howto li { margin:0 0 10px; }
   .howto li:last-child { margin-bottom:0; }
   .howto .red { background:var(--bar); color:var(--bar); border-radius:2px; padding:0 2px; user-select:none; }
+  /* :not([hidden]) so the hidden attribute still wins (a bare .x{display:flex} overrides [hidden]) */
+  .data-actions:not([hidden]), .data-pending:not([hidden]) { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:8px 0; }
+  .data-danger { border-color:var(--bad); color:var(--bad); }
   .opts { display:flex; flex-direction:column; gap:10px; }
   .opt-card { display:flex; flex-direction:column; align-items:flex-start; gap:3px; text-align:left; text-transform:none; letter-spacing:0; background:var(--surface); color:var(--ink); border:1px solid var(--line); padding:12px 14px; cursor:pointer; }
   .opt-card:hover:not(:disabled) { border-color:var(--ink); background:var(--paper); }
   .opt-t { font-family:var(--mono); font-weight:700; font-size:.82rem; letter-spacing:.04em; text-transform:uppercase; }
   .opt-d { font-family:var(--serif); font-style:italic; font-size:.85rem; color:var(--muted); }
+  .privacy-body { font-family:var(--mono); font-size:.8rem; line-height:1.55; }
+  .privacy-body p { margin:0 0 12px; }
+  .privacy-body .settings-h { margin:16px 0 6px; }
+  .privacy-body a { color:inherit; }
   .ownrow { display:none; gap:8px; }
   .ownrow.show { display:flex; }
   .ownrow input { flex:1; min-width:160px; font-family:var(--mono); font-size:.82rem; padding:9px 10px; border:1px solid var(--line); background:var(--surface); }
@@ -132,8 +158,11 @@
   .guessbar { display:flex; gap:8px; margin-bottom:6px; position:sticky; top:0; background:var(--paper); padding:10px 0; z-index:5; border-bottom:1px solid var(--line); }
   .guesswrap { position:relative; flex:1; display:flex; }
   .guess-top { display:none; }   /* mobile-only; shown in the footer guessbar (see the 640px rule) */
-  #guess { flex:1; font-family:var(--mono); font-size:1rem; padding:11px 38px 11px 12px; border:2px solid var(--ink); background:var(--surface); color:var(--ink); }
+  #guess { flex:1; font-family:var(--mono); font-size:1rem; padding:11px 38px 11px 12px; border:2px solid var(--ink); background:var(--surface); color:var(--ink); transition:box-shadow .15s ease; }
   #guess:focus { outline:3px solid var(--marker); outline-offset:-1px; }
+  /* wrong-guess feedback: a coloured ring (no shake). --bad is red, or cb-safe orange in
+     colour-blind mode. Layered as box-shadow so it coexists with the focus outline. */
+  #guess.miss { box-shadow:0 0 0 3px var(--bad); }
   .gcount { position:absolute; right:12px; top:50%; transform:translateY(-50%); font-family:var(--mono); font-size:.85rem; font-weight:700; color:var(--muted); pointer-events:none; }
   button { font-family:var(--mono); font-weight:700; letter-spacing:.05em; text-transform:uppercase; font-size:.8rem; padding:9px 16px; border:2px solid var(--ink); background:var(--ink); color:var(--paper); cursor:pointer; }
   button:hover:not(:disabled) { background:var(--classified); border-color:var(--classified); }
@@ -201,7 +230,17 @@
   #socialModalBody { display:flex; flex-direction:column; gap:10px; }
   #socialModalBody button { display:block; width:100%; }
   #socialModalBody button[hidden] { display:none; }   /* else display:block above overrides the `hidden` attr — Invite must vanish when solved/in a room */
-  #article { grid-area:article; }
+  #article { grid-area:article; position:relative; }
+  /* screen-reader-only utility (clip out of view but keep it announced) */
+  .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0; }
+  /* article loading overlay: shown over #article while the live wiki fetch runs (toggled
+     by #article.loading in loadArticle). Visible even on mobile, where #status is hidden. */
+  .article-loading { display:none; }
+  #article.loading .article-loading { display:flex; align-items:center; gap:10px; position:absolute; inset:0; z-index:2;
+    background:var(--paper); font-family:var(--mono); font-size:.85rem; color:var(--muted); }
+  .spinner { width:18px; height:18px; border:2px solid var(--line); border-top-color:var(--ink); border-radius:50%; animation:spin .8s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  html.reduce-motion .spinner { animation:none; }   /* respect the Motion pref */
   /* the controls column follows you down the page as the (taller) article scrolls —
      pinned directly below the sticky top bar. --header-h is the top bar's full rendered
      height (no margin between them), so the stuck position equals the column's natural
@@ -263,7 +302,11 @@
        buttons stay at the top of the article (Share + Invite are reparented into the
        #socialmodal popup behind the "Social" button — see placeSocial). */
     .statusbar .status { display:none; }
-    .statusbar { margin-bottom:8px; }
+    .statusbar { margin-bottom:8px; gap:8px; }
+    /* keep the status row (score pill + Social + Daily metrics) on ONE line down to ~320px
+       without wrapping: tighter gaps + smaller secondary buttons. */
+    .statusbtns { gap:6px; }
+    .statusbtns button { padding:6px 7px; font-size:.6rem; }
     /* the Hints panel (#hintbox) is reparented by JS into the #hintsmodal popup on
        mobile (opened by the footer "Hints" button), so it no longer sits above the
        article. Inside the modal it shows flush (no extra margin) and scrolls with the
@@ -281,7 +324,10 @@
   #body ul { margin:0 0 1em 1.3em; padding:0; }
   #body li { margin:.28em 0; }
 
-  .red { display:inline-block; background:var(--bar); color:transparent; border-radius:2px; user-select:none; vertical-align:baseline; height:1.05em; line-height:1.05em; }
+  /* max-width caps a very long word's box at the column width so it can't push the page
+     wider than the viewport (mobile sideways-scroll). It only clamps boxes that would
+     overflow; normal words are untouched, so nothing extra wraps. */
+  .red { display:inline-block; max-width:100%; background:var(--bar); color:transparent; border-radius:2px; user-select:none; vertical-align:baseline; height:1.05em; line-height:1.05em; }
   .red .len { font-family:var(--mono); font-size:.7em; color:rgba(255,255,255,.55); padding:0 3px; }
   .shown { background:transparent; color:var(--ink); }
   /* Letters-tier reveals laid over the title: the lit prefix reads as a hint (subtle
@@ -292,9 +338,9 @@
   .flash { background:var(--marker); color:#1a1a1a; transition:background 1.2s ease; }
   /* a guess that hits a TITLE word (the win condition) flashes GREEN, not yellow, so it
      reads as "that mattered" — distinct from an ordinary body-word hit. */
-  .flash-title { background:#1f9d55; color:#fff; transition:background 1.4s ease; }
+  .flash-title { background:var(--good); color:#fff; transition:background 1.4s ease; }
   /* the title-progress pill: tint it green once every title word is found (you've won / are about to) */
-  #titleProgress.complete b { color:#1f9d55; }
+  #titleProgress.complete b { color:var(--good); }
   /* history navigation: every occurrence of the clicked word, and the active one */
   .red.locate { background:var(--marker); color:#1a1a1a; border-radius:2px; transition:background .2s ease; }
   .red.locate-active { background:var(--classified); color:#fff; border-radius:2px; box-shadow:0 0 0 2px var(--classified); }
@@ -307,6 +353,11 @@
   .win { margin-top:24px; padding:16px; border:3px double var(--classified); font-family:var(--mono); display:none; }
   .win.show { display:block; }
   .win h3 { margin:0 0 6px; color:var(--classified); letter-spacing:.1em; }
+  /* retention row under the win/give-up banner: next-daily countdown + Share / Play another */
+  .win-cta { display:flex; align-items:center; flex-wrap:wrap; gap:10px 14px; margin-top:12px; }
+  .next-daily { font-size:.78rem; color:var(--muted); }
+  .win-btns { display:flex; gap:8px; margin-left:auto; }
+  .win-btns button { padding:7px 14px; font-size:.72rem; }
 
   /* ---- multiplayer ---- */
   .authnote { font-family:var(--mono); font-size:.78rem; color:var(--ink); background:var(--hintbg); border:1px solid var(--line); padding:8px 10px; border-radius:4px; margin-bottom:12px; }
@@ -355,15 +406,17 @@
   .setrow input { width:15px; height:15px; flex:0 0 auto; accent-color:var(--classified); cursor:pointer; }
   .follow-search { width:100%; font-family:var(--mono); font-size:.82rem; padding:8px 10px; border:1px solid var(--line); background:var(--surface); margin-bottom:8px; }
   .follow-search:focus { outline:2px solid var(--marker); outline-offset:-1px; }
+  .dn-input { flex:1; width:auto; margin-bottom:0; }
   .setrow-sel { justify-content:space-between; cursor:default; }
   .home-daily-sel { font-family:var(--mono); font-size:.8rem; padding:5px 8px; border:1px solid var(--line); background:var(--surface); color:var(--ink); max-width:62%; cursor:pointer; }
   .home-daily-sel:focus { outline:2px solid var(--marker); outline-offset:-1px; }
   .settings-divider { border-top:1px solid var(--line); margin:18px 0 14px; }
   /* profile: display-name editor */
-  .dn-actions { display:flex; align-items:center; gap:10px; }
-  .dn-actions .msg { font-family:var(--mono); font-size:.72rem; color:var(--muted); min-height:1em; }
-  .dn-actions .msg.err { color:var(--classified); }
-  .dn-actions .msg.ok { color:#3aa657; }
+  .dn-actions { display:flex; align-items:stretch; gap:8px; }
+  .dn-actions button { padding:0 14px; }
+  #nameMsg { display:block; font-family:var(--mono); font-size:.72rem; color:var(--muted); min-height:1em; margin-top:6px; }
+  #nameMsg.err { color:var(--classified); }
+  #nameMsg.ok { color:var(--good); }
   .followlist { max-height:46vh; overflow-y:auto; display:flex; flex-direction:column; border:1px solid var(--line); background:var(--surface); }
   .followrow { display:flex; align-items:center; gap:9px; font-family:var(--mono); font-size:.82rem; padding:7px 10px; border-bottom:1px dotted var(--line); cursor:pointer; }
   .followrow:last-child { border-bottom:0; }
@@ -399,6 +452,14 @@
   .feedcard.empty { cursor:default; opacity:.55; }
   .feedcard .fc-status { font-weight:700; color:var(--classified); }
   .feed-empty { font-family:var(--mono); font-size:.74rem; color:var(--muted); }
+  /* Configure dailies: collapsible config at the top of the drawer (native <details>) */
+  .feed-config { flex:0 0 auto; }
+  .feed-config > summary { cursor:pointer; list-style:none; padding:9px 11px; font-family:var(--mono); font-weight:700; font-size:.76rem; text-transform:uppercase; letter-spacing:.06em; border:1px solid var(--ink); background:var(--surface); color:var(--ink); }
+  .feed-config > summary::-webkit-details-marker { display:none; }
+  .feed-config > summary::after { content:"▸"; float:right; }
+  .feed-config[open] > summary::after { content:"▾"; }
+  .feed-config > summary:hover, .feed-config[open] > summary { background:var(--paper); }
+  .feed-config-body { padding:10px 2px 2px; }
   /* Archive: collapsible list of past dailies (native <details>) */
   .feed-archive { border-top:1px solid var(--line); margin-top:4px; padding-top:4px; }
   .feed-archive > summary { cursor:pointer; padding:8px 4px; font-family:var(--mono); font-size:.76rem; color:var(--muted); }
@@ -438,8 +499,8 @@
   /* contribution-style heatmap of featured-daily results */
   .statcal { display:grid; grid-auto-flow:column; grid-template-rows:repeat(7, 11px); grid-auto-columns:11px; gap:2px; margin-bottom:6px; overflow-x:auto; padding-bottom:2px; }
   .statcal .cell { width:11px; height:11px; border-radius:2px; background:var(--line); }
-  .statcal .cell.solved { background:#3aa657; }
-  .statcal .cell.missed { background:var(--classified); }
+  .statcal .cell.solved { background:var(--good); }
+  .statcal .cell.missed { background:var(--bad); }
   .statcal .cell.pad  { background:transparent; }
   .statcal .cell.today { box-shadow:inset 0 0 0 1.5px var(--marker); }
   .statcal-legend { display:flex; gap:12px; font-size:.6rem; color:var(--muted); margin-bottom:18px; }
@@ -459,6 +520,7 @@
   <header>
     <button id="feedBtn" class="iconbtn" aria-label="Open daily feed" title="Daily feed">
       <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M2 4.5h14M2 9h14M2 13.5h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <span class="feedbtn-label">Daily feed</span>
     </button>
     <div class="brand">
       <h1 id="homeBtn" title="Back to today's puzzle">Red<span class="tag">igeer</span>dle</h1>
@@ -467,7 +529,9 @@
     </div>
     <div class="controls">
       <button id="statsBtn" class="ghost">My stats</button>
+      <button id="alsoBtn" class="ghost">Also visit</button>
       <button id="settingsBtn" class="ghost">Settings</button>
+      <button id="optionsBtn" class="ghost" aria-haspopup="dialog">Options</button>
       <button id="authToggle" class="ghost">Sign in</button>
       <button id="signOutBtn" class="ghost" style="display:none">Sign out</button>
       <span class="who" id="who"></span>
@@ -483,13 +547,23 @@
       <span class="feed-h">Your daily feed</span>
       <button class="feed-x" id="feedClose" aria-label="Close daily feed">&times;</button>
     </div>
+    <details class="feed-config" id="feedConfig">
+      <summary>Configure dailies</summary>
+      <div class="feed-config-body">
+        <div class="note" id="settingsNote"></div>
+        <label class="setrow setrow-sel" for="homeDailySelect">
+          <span>Homepage daily</span>
+          <select id="homeDailySelect" class="home-daily-sel"></select>
+        </label>
+        <div class="opt-d">Which daily opens on the homepage — the featured “general” daily, or one of your followed fandoms.</div>
+        <input id="followSearch" class="follow-search" type="text" placeholder="search fandoms…" autocomplete="off">
+        <div class="followlist" id="followList"></div>
+      </div>
+    </details>
     <input id="feedSearch" class="feed-search" type="text" placeholder="search feed…" autocomplete="off" hidden>
     <div class="feed-cards" id="feedCards"></div>
     <div class="feed-actions" id="feedActions">
       <button id="feedNewBtn" class="ghost">New game</button>
-      <button id="feedSettingsBtn" class="ghost">Settings</button>
-      <button id="feedHelpBtn" class="ghost">How to play</button>
-      <button id="feedStatsBtn" class="ghost">My stats</button>
     </div>
   </aside>
 
@@ -546,27 +620,120 @@
       <div class="profile-sec" id="profileSec" hidden>
         <div class="settings-h">Profile</div>
         <div class="opt-d">Your display name on the leaderboard and in “Signed in as”.</div>
-        <input id="displayNameInput" class="follow-search" type="text" maxlength="24" placeholder="display name" autocomplete="off">
         <div class="dn-actions">
+          <input id="displayNameInput" class="follow-search dn-input" type="text" maxlength="24" placeholder="display name" autocomplete="off">
           <button id="saveNameBtn">Save</button>
-          <span class="msg" id="nameMsg"></span>
         </div>
+        <span class="msg" id="nameMsg"></span>
         <div class="settings-divider"></div>
       </div>
       <div class="settings-h">Preferences</div>
-      <label class="setrow"><input type="checkbox" id="darkToggle"><span>Dark mode</span></label>
+      <label class="setrow setrow-sel" for="themeSelect">
+        <span>Theme</span>
+        <select id="themeSelect" class="home-daily-sel">
+          <option value="system">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </label>
+      <label class="setrow setrow-sel" for="motionSelect">
+        <span>Motion</span>
+        <select id="motionSelect" class="home-daily-sel">
+          <option value="system">System</option>
+          <option value="normal">Normal</option>
+          <option value="reduced">Reduced</option>
+        </select>
+      </label>
+      <label class="setrow"><input type="checkbox" id="cbToggle"><span>Colour-blind friendly colours</span></label>
       <label class="setrow"><input type="checkbox" id="scrollToggle"><span>Jump to a word when you guess it</span></label>
       <div class="settings-divider"></div>
-      <div class="settings-h">Daily feed</div>
-      <div class="opt-d">Pick the fandoms you want in your daily feed.</div>
-      <div class="note" id="settingsNote"></div>
-      <label class="setrow setrow-sel" for="homeDailySelect">
-        <span>Homepage daily</span>
-        <select id="homeDailySelect" class="home-daily-sel"></select>
-      </label>
-      <div class="opt-d">Which daily opens on the homepage — the featured “general” daily, or one of your followed fandoms.</div>
-      <input id="followSearch" class="follow-search" type="text" placeholder="search fandoms…" autocomplete="off">
-      <div class="followlist" id="followList"></div>
+      <button id="privacyBtn" class="ghost">Privacy policy</button>
+    </div>
+  </div>
+
+  <div class="modal" id="privacymodal" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-label="Privacy policy">
+      <button class="modal-x" id="privacyClose" aria-label="Close">&times;</button>
+      <h2 class="modal-title">Privacy policy</h2>
+      <div class="privacy-body">
+        <p class="opt-d">Last updated: 18 June 2026</p>
+        <p>Redigeerdle is a word-guessing game. This policy explains what data it stores and who it is shared with. It is deliberately short, because the game collects very little.</p>
+
+        <div class="settings-h">What we store</div>
+        <ul class="howto">
+          <li><strong>If you create an account</strong> (with Google or e-mail): your e-mail address and the display name you choose.</li>
+          <li><strong>If you play as a guest</strong>: only an anonymous ID — no name, no e-mail.</li>
+          <li><strong>Your gameplay</strong>: which puzzles you played, your guesses, score, hints used, time spent, timestamps, the source wiki, and the fandoms you follow. This powers your stats and the leaderboard.</li>
+          <li><strong>In your browser only</strong> (local storage): your settings, your current game progress, and — when logged out — your followed fandoms. This never leaves your device.</li>
+        </ul>
+        <p>We never store the article text or the puzzle answers. We do not collect your location, contacts, or any advertising identifiers.</p>
+
+        <div class="settings-h">Who it is shared with</div>
+        <ul class="howto">
+          <li><strong>Supabase</strong> — hosts the sign-in and database where your account and gameplay data live.</li>
+          <li><strong>Google</strong> — only if you choose “Sign in with Google”, to verify your identity.</li>
+          <li><strong>GitHub Pages</strong> — hosts the website files.</li>
+          <li><strong>The source wikis</strong> (Fandom, Wikipedia and other MediaWiki sites) — your browser fetches article content directly from them as you play.</li>
+          <li><strong>Hint providers</strong> (Google Gemini, Groq) — receive a snippet of the article to generate spoiler-free hints. They never receive your personal data.</li>
+          <li><strong>Cloudflare Web Analytics</strong> — counts page views and aggregate referrer/browser/country stats. It is cookieless and does not track or identify you.</li>
+        </ul>
+        <p>We do not sell your data, and we use no advertising trackers. Our only analytics is Cloudflare’s cookieless, privacy-first page-view counter above.</p>
+
+        <div class="settings-h">Cookies &amp; storage</div>
+        <p>The game uses your browser’s local storage to remember your settings and progress, and a sign-in token to keep you logged in. There are no tracking or advertising cookies.</p>
+
+        <div class="settings-h">Your choices</div>
+        <ul class="howto">
+          <li>Play without an account to stay anonymous.</li>
+          <li>Sign out any time, or clear your browser data to remove everything stored on your device.</li>
+          <li>Under the GDPR you can request access to, correction of, or deletion of your account data — use the buttons below, or contact us.</li>
+        </ul>
+
+        <div class="settings-h">Your data</div>
+        <p class="opt-d" id="dataRightsNote">Sign in to download or delete your account data.</p>
+        <div class="data-actions" id="dataActions" hidden>
+          <button id="exportDataBtn" class="ghost">Download my data</button>
+          <button id="deleteAccountBtn" class="ghost data-danger">Delete my account…</button>
+        </div>
+        <div class="data-pending" id="deletionPending" hidden>
+          <p class="msg" id="deletionMsg"></p>
+          <button id="cancelDeletionBtn" class="ghost">Cancel deletion</button>
+        </div>
+        <p class="msg" id="dataMsg"></p>
+
+        <div class="settings-h">Contact</div>
+        <p>Questions or a deletion request? E-mail <a href="mailto:fryingpanpotato@gmail.com">fryingpanpotato@gmail.com</a>.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="alsomodal" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-label="Also visit">
+      <button class="modal-x" id="alsoClose" aria-label="Close">&times;</button>
+      <h2 class="modal-title">Also visit</h2>
+      <div class="privacy-body">
+        <div class="settings-h">Jaardle</div>
+        <p><strong>Jaardle</strong> is Wordle for years. Each day brings one historical event —
+          you have six guesses to pin down the year it happened. Playable in Dutch, English and German.</p>
+        <p><a href="https://jaardle.nl" target="_blank" rel="noopener noreferrer">Play Jaardle at jaardle.nl →</a></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- mobile-only "Options" menu: consolidates the header/drawer utility actions so the
+       feed drawer has room for daily selection. Buttons delegate to the existing handlers. -->
+  <div class="modal" id="optionsmodal" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-label="Options">
+      <button class="modal-x" id="optionsClose" aria-label="Close">&times;</button>
+      <h2 class="modal-title">Options</h2>
+      <div class="optmenu">
+        <button id="optHelpBtn" class="ghost">How to play</button>
+        <button id="optStatsBtn" class="ghost">My stats</button>
+        <button id="optSettingsBtn" class="ghost">Settings</button>
+        <button id="optAlsoBtn" class="ghost">Also visit</button>
+        <button id="optSignIn" class="ghost">Sign in</button>
+        <button id="optSignOut" class="ghost" style="display:none">Sign out</button>
+      </div>
     </div>
   </div>
 
@@ -660,6 +827,10 @@
   <div id="playarea">
     <div class="statusbar" id="statusbar">
       <div class="status" id="status">Loading puzzle…</div>
+      <!-- always-present, visually-hidden mirror of #status for screen readers (the visible
+           #status is display:none on mobile, so an aria-live element that's hidden wouldn't
+           announce). setStatus() writes here too. -->
+      <div id="srLive" class="sr-only" role="status" aria-live="polite"></div>
       <div class="score" id="titleProgress" title="Title words you've uncovered — get them all to win. (Already-shown short words like “of/the” don't count.)" hidden>🎯 <b id="titleFound">0</b>/<b id="titleTotal">0</b></div>
       <div class="score" id="scorePill" title="Your score — lower is better. +1 for every 10 seconds, wrong guess +1, reveal a word +5, summary/category/source +10, first sentence +3 per hidden word it reveals, each title letter +20 then +5 more each, synonym scales with title length. Correct guesses are free.">Score: <b id="scoreVal">0</b></div>
       <div class="statusbtns">
@@ -701,10 +872,23 @@
       <div class="history" id="history"></div>
     </div>
 
-    <article id="article"><h2 id="title"></h2><div id="body"></div></article>
+    <article id="article">
+      <div class="article-loading" id="articleLoading"><span class="spinner" aria-hidden="true"></span> Loading article…</div>
+      <h2 id="title"></h2><div id="body"></div>
+    </article>
   </div>
 
-  <div class="win" id="win"><h3 id="winHead">DECLASSIFIED</h3><div id="winText"></div></div>
+  <div class="win" id="win">
+    <h3 id="winHead">DECLASSIFIED</h3>
+    <div id="winText"></div>
+    <div class="win-cta">
+      <span id="nextDaily" class="next-daily" hidden></span>
+      <span class="win-btns">
+        <button id="winShareBtn">Share result</button>
+        <button id="winNewBtn" class="ghost">Play another</button>
+      </span>
+    </div>
+  </div>
 
   <!-- versus: the board is locked until the host presses Play; everyone else waits here -->
   <div class="mpwaiting" id="mpWaiting" hidden>
@@ -924,6 +1108,8 @@ function revealKey(key) {
   (tokensByKey.get(key) || []).forEach(t => { if (t.revealed && t.el && !t.el.classList.contains("shown")) showSpan(t); });
 }
 
+// "smooth" normally, but "auto" (instant) when the OS asks to reduce motion
+function scrollMotion() { return document.documentElement.classList.contains("reduce-motion") ? "auto" : "smooth"; }
 function flashKey(key) {
   // a title-word hit flashes GREEN (the win condition mattered); ordinary hits flash yellow.
   const cls = titleKeySet.has(key) ? "flash-title" : "flash";
@@ -966,7 +1152,7 @@ function gotoWord(key, scroll = true) {
   spans.forEach(s => s.classList.add("locate"));   // mark every occurrence
   const el = spans[i];
   el.classList.remove("locate"); el.classList.add("locate-active");   // the one we jumped to
-  if (scroll) el.scrollIntoView({ behavior: "smooth", block: "center" });
+  if (scroll) el.scrollIntoView({ behavior: scrollMotion(), block: "center" });
 }
 
 // build one history row (newest-first list) for a guess. Rows are immutable once made
@@ -1079,6 +1265,28 @@ function lockGame() {
   if (document.getElementById("hintbox").style.display === "block") renderHints();
 }
 
+// ms until the next Europe/Amsterdam midnight — when the dailies roll over (matches todayLocal)
+function msToNextDaily() {
+  const p = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Amsterdam", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).formatToParts(new Date());
+  const get = t => +p.find(x => x.type === t).value;
+  const h = get("hour") % 24, m = get("minute"), s = get("second");
+  return ((23 - h) * 3600 + (59 - m) * 60 + (60 - s)) * 1000;
+}
+function fmtCountdown(ms) {
+  const t = Math.max(0, Math.floor(ms / 1000)), p2 = n => String(n).padStart(2, "0");
+  return p2(Math.floor(t / 3600)) + ":" + p2(Math.floor(t % 3600 / 60)) + ":" + p2(t % 60);
+}
+// the win/give-up banner shows a live countdown to the next daily (dailies only); ticked by
+// the 1s score-clock interval, which keeps running even though the time-score is frozen
+function updateNextDailyCountdown() {
+  if (!document.getElementById("win").classList.contains("show")) return;
+  const el = document.getElementById("nextDaily");
+  if (currentShare && currentShare.kind === "daily") {
+    el.hidden = false;
+    el.textContent = "⏭ Next daily in " + fmtCountdown(msToNextDaily());
+  } else { el.hidden = true; }
+}
+
 function checkWin() {
   if (titleKeyWords.length && titleKeyWords.every(t => t.revealed)) {
     solved = true;
@@ -1089,6 +1297,7 @@ function checkWin() {
     draw();
     document.getElementById("winHead").textContent = "DECLASSIFIED";
     document.getElementById("win").classList.add("show");
+    updateNextDailyCountdown();
     const reveals = guesses.filter(g => g.hint).length;
     document.getElementById("winText").textContent =
       'Title: "' + META.title + '" — solved in ' + guesses.length + ' guesses'
@@ -1112,6 +1321,7 @@ function giveUp() {
   draw();
   document.getElementById("winHead").textContent = "GAVE UP";
   document.getElementById("win").classList.add("show");
+  updateNextDailyCountdown();
   document.getElementById("winText").textContent =
     'You gave up. The title was "' + META.title + '". Score ' + computeScore() + ' (lower is better).';
   lockGame();
@@ -1175,7 +1385,14 @@ function submitGuess() {
   const raw = input.value.trim(); const key = norm(raw); input.value = "";
   updateGuessCount();
   if (!key || guessed.has(key)) return;
-  applyGuess(key, raw, false);
+  if (applyGuess(key, raw, false) === 0) flashMiss(input);   // 0 hits → wrong-guess border
+}
+// briefly ring the guess input (a colour cue, no shake) when a typed guess hit nothing
+function flashMiss(input) {
+  input.classList.remove("miss");
+  void input.offsetWidth;   // restart the transition if a previous miss is still fading
+  input.classList.add("miss");
+  setTimeout(() => input.classList.remove("miss"), 600);
 }
 
 // live letter count shown at the right of the guess field (matches the length
@@ -1187,7 +1404,12 @@ function updateGuessCount() {
 
 // reveal mode: arm with the button, then click a word in the text.
 // title words are locked (can't be revealed for free). max 3 reveals.
-function setStatus(msg) { document.getElementById("status").textContent = msg; }
+function setStatus(msg) {
+  document.getElementById("status").textContent = msg;
+  // mirror to the always-present aria-live region so screen readers hear it even on
+  // mobile, where the visible #status is display:none (a hidden live region won't announce)
+  document.getElementById("srLive").textContent = msg;
+}
 
 function disarm() {
   revealArmed = false;
@@ -1646,6 +1868,7 @@ function initGame(title, blocks, meta) {
   nonStopTotal = tokens.reduce((n, t) => n + (t.stop ? 0 : 1), 0) || 1;
   document.getElementById("history").innerHTML = ""; historyRendered = 0;   // fresh history for the new article
   document.getElementById("win").classList.remove("show");
+  document.getElementById("article").classList.remove("loading");   // article is ready → drop the loading overlay
   document.getElementById("body").classList.remove("arming");
   const box = document.getElementById("hintbox"); box.style.display = "none"; box.textContent = "";
   document.getElementById("guess").disabled = false;
@@ -1655,7 +1878,9 @@ function initGame(title, blocks, meta) {
   document.getElementById("hintsBtn").disabled = false;
   document.getElementById("giveUpBtn").disabled = false;
   updateRevealBtn();
-  document.getElementById("guess").focus();
+  // autofocus the guess box so you can type immediately — desktop only (on mobile it would
+  // pop the keyboard and shove the layout on every load)
+  if (!mqMobile.matches) document.getElementById("guess").focus();
   draw(); refreshMeta(); attribution(false);
 }
 
@@ -1756,6 +1981,14 @@ const badTitle = t =>
 
 // shared core: load an article by page title or by revision (oldid)
 async function loadArticle(apiBase, wikiLabel, parseParams, opts = {}) {
+  // show the loading overlay over #article for the whole fetch; finally clears it on
+  // success OR failure (random search throws per rejected candidate — overlay rides each try)
+  const art = document.getElementById("article");
+  art.classList.add("loading");
+  try { return await loadArticleImpl(apiBase, wikiLabel, parseParams, opts); }
+  finally { art.classList.remove("loading"); }
+}
+async function loadArticleImpl(apiBase, wikiLabel, parseParams, opts = {}) {
   setStatus("Loading article…");
   // starting a fresh solo game while in a room (and not loading INTO one) → leave it
   if (mp.active && !mp._loading && !pendingMpMode) mp.leaveRoom();
@@ -1890,7 +2123,7 @@ function setUrlMsg(msg, isErr) {
   // mobile: on an error, scroll it into view inside the (scrollable) modal so the
   // user immediately sees something went wrong — the message can sit below the fold.
   if (isErr && window.matchMedia("(max-width:640px)").matches) {
-    requestAnimationFrame(() => el.scrollIntoView({ behavior: "smooth", block: "center" }));
+    requestAnimationFrame(() => el.scrollIntoView({ behavior: scrollMotion(), block: "center" }));
   }
 }
 
@@ -2435,19 +2668,46 @@ function closeMenu() {
   setUrlMsg("");
 }
 
-/* ---- preferences: dark mode + auto-scroll (persisted in localStorage) ---- */
-function isDark() { return document.documentElement.classList.contains("dark"); }
-function setTheme(dark) {
+/* ---- preferences: theme + motion + colour-blind + auto-scroll (persisted in localStorage).
+   Theme and Motion are 3-state (light/dark/system, normal/reduced/system); "system" stores
+   NO key (default) and mirrors the OS, kept live by the matchMedia listeners in loadPrefs.
+   The pre-paint head script applies the same resolution so there's no flash on load. ---- */
+function themePref() { try { return localStorage.getItem("redigeerdle:theme") || "system"; } catch { return "system"; } }
+function applyTheme(mode) {   // mode ∈ light|dark|system
+  const dark = mode === "dark" || (mode !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
   document.documentElement.classList.toggle("dark", dark);
-  try { localStorage.setItem("redigeerdle:theme", dark ? "dark" : "light"); } catch { /* storage blocked */ }
 }
-// load the saved auto-scroll preference (dark mode is applied earlier by the head script)
+function setTheme(mode) {
+  try { if (mode === "system") localStorage.removeItem("redigeerdle:theme"); else localStorage.setItem("redigeerdle:theme", mode); } catch { /* storage blocked */ }
+  applyTheme(mode);
+}
+function motionPref() { try { return localStorage.getItem("redigeerdle:motion") || "system"; } catch { return "system"; } }
+function applyMotion(mode) {   // mode ∈ normal|reduced|system
+  const reduce = mode === "reduced" || (mode !== "normal" && matchMedia("(prefers-reduced-motion: reduce)").matches);
+  document.documentElement.classList.toggle("reduce-motion", reduce);
+}
+function setMotion(mode) {
+  try { if (mode === "system") localStorage.removeItem("redigeerdle:motion"); else localStorage.setItem("redigeerdle:motion", mode); } catch { /* storage blocked */ }
+  applyMotion(mode);
+}
+// colour-blind friendly palette (html.cb swaps green/red → blue/orange; applied pre-paint by the head script)
+function isCb() { return document.documentElement.classList.contains("cb"); }
+function setColorblind(on) {
+  document.documentElement.classList.toggle("cb", on);
+  try { if (on) localStorage.setItem("redigeerdle:cb", "1"); else localStorage.removeItem("redigeerdle:cb"); } catch { /* storage blocked */ }
+}
+// load the auto-scroll preference; keep "system" theme/motion live as the OS setting changes
+// (the explicit light/dark/normal/reduced choices ignore the OS, so they're guarded by the pref)
 function loadPrefs() {
   try { prefAutoScroll = localStorage.getItem("redigeerdle:autoscroll") !== "0"; } catch { prefAutoScroll = true; }
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (themePref() === "system") applyTheme("system"); });
+  matchMedia("(prefers-reduced-motion: reduce)").addEventListener("change", () => { if (motionPref() === "system") applyMotion("system"); });
 }
 // reflect the current preferences in the Settings controls (called when the modal opens)
 function syncPrefControls() {
-  document.getElementById("darkToggle").checked = isDark();
+  document.getElementById("themeSelect").value = themePref();
+  document.getElementById("motionSelect").value = motionPref();
+  document.getElementById("cbToggle").checked = isCb();
   document.getElementById("scrollToggle").checked = prefAutoScroll;
   syncProfileControls();
 }
@@ -2487,19 +2747,89 @@ async function saveDisplayName() {
   renderAuth();   // refresh the "Signed in as <name>" label
 }
 
+/* ---- GDPR data rights (in the Privacy policy modal) ----
+   Export = download a JSON copy of your own rows (owner-only RLS scopes the reads).
+   Delete = schedule deletion 7 days out by stamping profiles.deletion_requested_at;
+   Cancel = clear it. A daily job (scripts/purge-deletions.mjs) does the actual delete. */
+function dataMsg(text, cls) {
+  const m = document.getElementById("dataMsg");
+  m.textContent = text || ""; m.className = "msg" + (cls ? " " + cls : "");
+}
+function syncDataRights() {
+  const real = isRealUser();
+  document.getElementById("dataRightsNote").textContent = real
+    ? "Download a copy of your data, or schedule your account for deletion (7-day grace period, cancelable)."
+    : "Sign in to download or delete your account data.";
+  document.getElementById("dataActions").hidden = !real;
+  document.getElementById("deletionPending").hidden = true;
+  document.getElementById("deleteAccountBtn").hidden = false;
+  dataMsg("");
+  if (real && supa) refreshDeletionState();
+}
+async function refreshDeletionState() {
+  const { data } = await supa.from("profiles").select("deletion_requested_at").eq("id", currentUser.id).maybeSingle();
+  const at = data && data.deletion_requested_at;
+  if (currentProfile) currentProfile.deletion_requested_at = at || null;
+  if (!at) return;   // not scheduled — buttons stay as-is
+  const when = new Date(new Date(at).getTime() + 7 * 86400000);
+  document.getElementById("deletionMsg").textContent =
+    "Your account is scheduled for deletion on " + when.toLocaleDateString() + ". You can cancel until then.";
+  document.getElementById("deletionPending").hidden = false;
+  document.getElementById("deleteAccountBtn").hidden = true;   // already scheduled
+}
+async function exportMyData() {
+  if (!isRealUser() || !supa) return;
+  dataMsg("Preparing your data…");
+  const uid = currentUser.id;
+  const [plays, scores, follows, profile] = await Promise.all([
+    supa.from("plays").select("*").eq("user_id", uid),
+    supa.from("scores").select("*").eq("user_id", uid),
+    supa.from("follows").select("*").eq("user_id", uid),
+    supa.from("profiles").select("*").eq("id", uid).maybeSingle(),
+  ]);
+  const payload = {
+    exported_at: new Date().toISOString(),
+    account: { id: uid, email: currentUser.email || null },
+    profile: profile.data || null,
+    plays: plays.data || [], scores: scores.data || [], follows: follows.data || [],
+  };
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
+  a.download = "redigeerdle-mydata.json";
+  a.click(); URL.revokeObjectURL(a.href);
+  dataMsg("Downloaded.", "ok");
+}
+async function requestAccountDeletion() {
+  if (!isRealUser() || !supa) return;
+  if (!confirm("Schedule your account for deletion in 7 days?\n\nYour games, scores and follows will be permanently removed. You can cancel any time before then.")) return;
+  dataMsg("Scheduling…");
+  const { error } = await supa.from("profiles").update({ deletion_requested_at: new Date().toISOString() }).eq("id", currentUser.id);
+  if (error) { dataMsg("Couldn't schedule deletion — try again.", "err"); return; }
+  dataMsg("");
+  refreshDeletionState();
+}
+async function cancelAccountDeletion() {
+  if (!isRealUser() || !supa) return;
+  dataMsg("Cancelling…");
+  const { error } = await supa.from("profiles").update({ deletion_requested_at: null }).eq("id", currentUser.id);
+  if (error) { dataMsg("Couldn't cancel — try again.", "err"); return; }
+  if (currentProfile) currentProfile.deletion_requested_at = null;
+  document.getElementById("deletionPending").hidden = true;
+  document.getElementById("deleteAccountBtn").hidden = false;
+  dataMsg("Deletion cancelled.", "ok");
+}
+
 /* ---- settings: preferences + the daily-feed fandom follows ---- */
-async function openSettings() {
+function openSettings() {
   document.getElementById("settingsmodal").classList.add("open");
   syncPrefControls();
-  await renderFollowList();
 }
 function closeSettings() {
   document.getElementById("settingsmodal").classList.remove("open");
-  // On mobile Settings is only reachable from the (now-closed) feed drawer, so reopening
-  // it returns the player there with the follow changes already rendered — otherwise the
-  // feed wouldn't reflect a freshly-followed fandom until the drawer was reopened by hand.
-  if (mqMobile.matches) openFeed();
-  else renderFeed();   // desktop: drawer may be open behind Settings → follows may have changed
+  // Settings now opens from the header Options menu (mobile) / .controls (desktop), and the
+  // follow config lives in the feed drawer, not here — so just refresh the feed content in
+  // case the drawer is open behind Settings; don't navigate the player into it.
+  renderFeed();
 }
 // same overlapping-render guard as renderFeed (see feedRenderSeq): the awaits below let
 // a second call interleave and double the rows. Bump a token, fetch, then bail if stale.
@@ -2702,7 +3032,7 @@ async function renderFeed() {
   if (!followed.length) {
     const hint = document.createElement("div");
     hint.className = "feed-empty";
-    hint.textContent = "Follow fandoms in Settings to add them to your daily feed.";
+    hint.textContent = "Use “Configure dailies” above to follow fandoms and fill your daily feed.";
     cards.appendChild(hint);
   }
   const none = document.createElement("div");
@@ -3073,6 +3403,9 @@ function renderAuth() {
   const signedIn = isRealUser();   // an anonymous guest session reads as logged-out in the UI
   document.getElementById("authToggle").style.display = signedIn ? "none" : "";
   document.getElementById("signOutBtn").style.display = signedIn ? "" : "none";
+  // mirror the auth state into the mobile Options menu's sign in/out pair
+  document.getElementById("optSignIn").style.display = signedIn ? "none" : "";
+  document.getElementById("optSignOut").style.display = signedIn ? "" : "none";
   if (signedIn) {
     const name = (currentProfile && currentProfile.username) || currentUser.email || "player";
     who.textContent = "Signed in as ";
@@ -3112,7 +3445,8 @@ async function onAuth(session) {
   // follows: fold any local picks into the account on sign-in, then refresh the list
   if (isRealUser()) await mergeLocalFollowsToAccount();
   await loadFollows();
-  if (document.getElementById("settingsmodal").classList.contains("open")) { syncProfileControls(); renderFollowList(); }
+  if (document.getElementById("settingsmodal").classList.contains("open")) syncProfileControls();
+  if (document.getElementById("feedConfig").open) renderFollowList();   // config panel open → refresh its list
   renderFeed();   // the followed set may differ between account and local
 }
 
@@ -3512,8 +3846,8 @@ function renderMyStats() {
   ];
 
   const legend = "<div class='statcal-legend'>"
-    + "<span><span class='sw' style='background:#3aa657'></span>Solved</span>"
-    + "<span><span class='sw' style='background:var(--classified)'></span>Missed</span>"
+    + "<span><span class='sw' style='background:var(--good)'></span>Solved</span>"
+    + "<span><span class='sw' style='background:var(--bad)'></span>Missed</span>"
     + "<span><span class='sw' style='background:var(--line)'></span>Not played</span>"
     + "<span><span class='sw' style='background:var(--line);box-shadow:inset 0 0 0 1.5px var(--marker)'></span>Today</span></div>";
 
@@ -3589,10 +3923,10 @@ document.getElementById("history").addEventListener("click", e => {
   if (row && row.dataset.key) gotoWord(row.dataset.key);
 });
 document.getElementById("topBtn").addEventListener("click", () =>
-  window.scrollTo({ top: 0, behavior: "smooth" }));
+  window.scrollTo({ top: 0, behavior: scrollMotion() }));
 // mobile: the ↑ button left of the guess field does the same (quick scroll to top)
 document.getElementById("guessTopBtn").addEventListener("click", () =>
-  window.scrollTo({ top: 0, behavior: "smooth" }));
+  window.scrollTo({ top: 0, behavior: scrollMotion() }));
 document.getElementById("hintsBtn").addEventListener("click", showHints);
 document.getElementById("giveUpBtn").addEventListener("click", () => {
   if (solved || gaveUp) return;
@@ -3653,12 +3987,25 @@ document.getElementById("archiveClose").addEventListener("click", () => document
 document.getElementById("archivemodal").addEventListener("click", e => {
   if (e.target.id === "archivemodal") e.currentTarget.classList.remove("open");
 });
-// mobile drawer quick actions: close the drawer, then trigger the same action as the
-// (hidden-on-mobile) header buttons. New game / Settings / How to play.
+// mobile drawer: only "New game" stays here now — the other utility actions moved into
+// the header "Options" menu (see #optionsmodal) so the drawer has room for daily selection.
 document.getElementById("feedNewBtn").addEventListener("click", () => { closeFeed(); openMenu(); });
-document.getElementById("feedSettingsBtn").addEventListener("click", () => { closeFeed(); openSettings(); });
-document.getElementById("feedHelpBtn").addEventListener("click", () => { closeFeed(); document.getElementById("helpmodal").classList.add("open"); });
-document.getElementById("feedStatsBtn").addEventListener("click", () => { closeFeed(); openStats(); });
+
+// mobile "Options" menu: a generic header button collapsing How to play / My stats /
+// Settings / Also visit / Sign in-out. Each delegates to the existing handler.
+function openOptions() { document.getElementById("optionsmodal").classList.add("open"); }
+function closeOptions() { document.getElementById("optionsmodal").classList.remove("open"); }
+document.getElementById("optionsBtn").addEventListener("click", openOptions);
+document.getElementById("optionsClose").addEventListener("click", closeOptions);
+document.getElementById("optionsmodal").addEventListener("click", e => {
+  if (e.target.id === "optionsmodal") closeOptions();
+});
+document.getElementById("optHelpBtn").addEventListener("click", () => { closeOptions(); document.getElementById("helpmodal").classList.add("open"); });
+document.getElementById("optStatsBtn").addEventListener("click", () => { closeOptions(); openStats(); });
+document.getElementById("optSettingsBtn").addEventListener("click", () => { closeOptions(); openSettings(); });
+document.getElementById("optAlsoBtn").addEventListener("click", () => { closeOptions(); document.getElementById("alsomodal").classList.add("open"); });
+document.getElementById("optSignIn").addEventListener("click", () => { closeOptions(); document.getElementById("authToggle").click(); });
+document.getElementById("optSignOut").addEventListener("click", () => { closeOptions(); signOut(); });
 
 // daily-feed drawer (slides in from the left, opened by the header hamburger):
 // toggles open, renders the followed dailies
@@ -3671,6 +4018,7 @@ function openFeed() {
   document.getElementById("feed").classList.add("open");
   document.getElementById("feedBackdrop").classList.add("open");
   document.getElementById("feedBtn").classList.add("active");
+  topbarEl.classList.remove("topbar--hidden");   // ensure the header is shown while the drawer is open
   document.getElementById("authmodal").classList.remove("open");   // close the sign-in popup if it was up
   renderFeed();
   document.getElementById("feedSearch").focus();
@@ -3684,11 +4032,19 @@ document.getElementById("feedBackdrop").addEventListener("click", closeFeed);
 document.getElementById("feedSearch").addEventListener("input", filterFeedCards);
 document.getElementById("followSearch").addEventListener("input", filterFollowList);
 document.getElementById("homeDailySelect").addEventListener("change", e => setHomeDailyPref(e.target.value));
+// "Configure dailies" expander at the top of the drawer: render the follow list when it
+// unfolds; on collapse refresh the feed cards so a freshly-followed fandom shows up.
+document.getElementById("feedConfig").addEventListener("toggle", e => {
+  if (e.target.open) renderFollowList();
+  else if (document.getElementById("feed").classList.contains("open")) renderFeed();
+});
 document.getElementById("saveNameBtn").addEventListener("click", saveDisplayName);
 document.getElementById("displayNameInput").addEventListener("keydown", e => {
   if (e.key === "Enter") { e.preventDefault(); saveDisplayName(); }
 });
-document.getElementById("darkToggle").addEventListener("change", e => setTheme(e.target.checked));
+document.getElementById("themeSelect").addEventListener("change", e => setTheme(e.target.value));
+document.getElementById("motionSelect").addEventListener("change", e => setMotion(e.target.value));
+document.getElementById("cbToggle").addEventListener("change", e => setColorblind(e.target.checked));
 document.getElementById("scrollToggle").addEventListener("change", e => {
   prefAutoScroll = e.target.checked;
   try { localStorage.setItem("redigeerdle:autoscroll", prefAutoScroll ? "1" : "0"); } catch { /* storage blocked */ }
@@ -3698,6 +4054,25 @@ document.getElementById("settingsmodal").addEventListener("click", e => {
   if (e.target.id === "settingsmodal") closeSettings();
 });
 
+document.getElementById("privacyBtn").addEventListener("click", () => {
+  document.getElementById("privacymodal").classList.add("open");
+  syncDataRights();
+});
+document.getElementById("exportDataBtn").addEventListener("click", exportMyData);
+document.getElementById("deleteAccountBtn").addEventListener("click", requestAccountDeletion);
+document.getElementById("cancelDeletionBtn").addEventListener("click", cancelAccountDeletion);
+document.getElementById("privacyClose").addEventListener("click", () => document.getElementById("privacymodal").classList.remove("open"));
+document.getElementById("privacymodal").addEventListener("click", e => {
+  if (e.target.id === "privacymodal") e.currentTarget.classList.remove("open");
+});
+
+// "Also visit" → a small modal with a link to Jaardle (desktop button + mobile drawer button)
+document.getElementById("alsoBtn").addEventListener("click", () => document.getElementById("alsomodal").classList.add("open"));
+document.getElementById("alsoClose").addEventListener("click", () => document.getElementById("alsomodal").classList.remove("open"));
+document.getElementById("alsomodal").addEventListener("click", e => {
+  if (e.target.id === "alsomodal") e.currentTarget.classList.remove("open");
+});
+
 document.addEventListener("keydown", e => {
   if (e.key !== "Escape") return;
   // reveal mode armed → Esc cancels it (same as clicking the button again)
@@ -3705,9 +4080,12 @@ document.addEventListener("keydown", e => {
   if (document.getElementById("newmodal").classList.contains("open")) { closeMenu(); setMode("daily"); }
   if (document.getElementById("settingsmodal").classList.contains("open")) closeSettings();
   document.getElementById("helpmodal").classList.remove("open");
+  document.getElementById("privacymodal").classList.remove("open");
+  document.getElementById("alsomodal").classList.remove("open");
   document.getElementById("hintsmodal").classList.remove("open");
   document.getElementById("socialmodal").classList.remove("open");
   document.getElementById("archivemodal").classList.remove("open");
+  document.getElementById("optionsmodal").classList.remove("open");
   document.getElementById("authmodal").classList.remove("open");
   closeMetrics();
   closeStats();
@@ -3739,6 +4117,9 @@ function goFandom() {
 document.getElementById("fandomSearch").addEventListener("input", filterFandomPicker);
 document.getElementById("fandomSearch").addEventListener("keydown", e => { if (e.key === "Enter") goFandom(); });
 document.getElementById("shareBtn").addEventListener("click", doShare);
+// win/give-up banner retention CTAs
+document.getElementById("winShareBtn").addEventListener("click", doShare);
+document.getElementById("winNewBtn").addEventListener("click", openMenu);
 
 /* ---- multiplayer wiring ---- */
 // New game → choose a multiplayer mode, then pick any article source below; the room
@@ -3801,7 +4182,10 @@ const mqMobile = window.matchMedia("(max-width:640px)");
 let lastScrollY = window.scrollY;
 function onScrollHeader() {
   const y = window.scrollY;
-  if (!mqMobile.matches) { topbarEl.classList.remove("topbar--hidden"); lastScrollY = y; return; }
+  // desktop is always pinned; so is mobile while the feed drawer is open (the drawer
+  // anchors at --header-h, so hiding the bar would leave an empty strip above it).
+  const feedOpen = document.getElementById("feed").classList.contains("open");
+  if (!mqMobile.matches || feedOpen) { topbarEl.classList.remove("topbar--hidden"); lastScrollY = y; return; }
   if (Math.abs(y - lastScrollY) < 6) return;            // ignore tiny moves (jitter)
   if (y > lastScrollY && y > 60) topbarEl.classList.add("topbar--hidden");   // scrolling down
   else if (y < lastScrollY) topbarEl.classList.remove("topbar--hidden");     // scrolling up
@@ -3852,6 +4236,7 @@ else mqMobile.addListener(onMobileMqChange);
    the finish and pauses while the tab is hidden. */
 let scoreClockLast = -1;
 setInterval(() => {
+  updateNextDailyCountdown();   // ticks on the finished-game banner even though the score clock below is frozen
   // the clock only moves the TIME component; if it isn't running (not started, finished,
   // tab hidden, versus pre-start) the score is frozen — skip the recompute entirely.
   if (!playClockRunning()) return;
@@ -4352,5 +4737,7 @@ function pruneOldDailyState() {
   openHomeDaily();
 })();
 </script>
+<!-- Cloudflare Web Analytics — cookieless page-view/referrer/browser stats. -->
+<script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "516f7aa135004ce2b62ec1671e133ab5"}'></script>
 </body>
 </html>

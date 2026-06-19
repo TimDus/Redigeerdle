@@ -584,9 +584,10 @@ test("article body keeps its block structure (paragraphs + headings)", async ({ 
   expect(await page.locator("#body h2, #body h3").count()).toBeGreaterThan(0);
 });
 
-test("Settings opens a daily-feed fandom list built from the wikis table", async ({ page }) => {
-  await page.click("#settingsBtn");
-  await expect(page.locator("#settingsmodal")).toHaveClass(/open/);
+test("the feed drawer's 'Configure dailies' opens a fandom list built from the wikis table", async ({ page }) => {
+  await page.click("#feedBtn");
+  await expect(page.locator("#feed")).toHaveClass(/open/);
+  await page.click("#feedConfig > summary");   // unfold "Configure dailies"
   // logged out → saved on this device
   await expect(page.locator("#settingsNote")).toContainText("device");
   // one row per wiki from the (stubbed) wikis table
@@ -600,9 +601,6 @@ test("Settings opens a daily-feed fandom list built from the wikis table", async
   await expect(page.locator('#followList .followrow', { hasText: "zelda" })).toBeHidden();
   await page.fill("#followSearch", "");
   await expect(page.locator('#followList .followrow', { hasText: "zelda" })).toBeVisible();
-  // clicking the dimmed backdrop closes it
-  await page.locator("#settingsmodal").click({ position: { x: 5, y: 5 } });
-  await expect(page.locator("#settingsmodal")).not.toHaveClass(/open/);
 });
 
 test("layout: the two-column play area is the default (article | controls grid)", async ({ page }) => {
@@ -611,13 +609,13 @@ test("layout: the two-column play area is the default (article | controls grid)"
   await expect(page.locator("#playarea")).toHaveCSS("display", "grid");
   // and the controls column is the sticky right-hand cell
   await expect(page.locator("#controlcol")).toHaveCSS("position", "sticky");
-  // Settings has two visible sections here: Preferences (dark mode / jump-to-word) and
-  // Daily feed. (The Profile section is hidden when not signed in as a real account.)
+  // Settings now has one visible section here: Preferences (dark mode / jump-to-word).
+  // Daily-feed config moved to the feed drawer's "Configure dailies"; Profile is hidden
+  // when not signed in as a real account.
   await page.click("#settingsBtn");
   const headers = page.locator("#settingsmodal .settings-h:visible");
-  await expect(headers).toHaveCount(2);
+  await expect(headers).toHaveCount(1);
   await expect(headers.nth(0)).toHaveText("Preferences");
-  await expect(headers.nth(1)).toHaveText("Daily feed");
   await expect(page.locator("#profileSec")).toBeHidden();
 });
 
@@ -627,22 +625,78 @@ test("layout: collapses to a single column on a narrow viewport", async ({ page 
   await expect(page.locator("#playarea")).toHaveCSS("display", "contents");
 });
 
-test("Settings: Dark mode toggles the theme and persists across reloads", async ({ page }) => {
-  // starts light
+test("Settings: Theme select switches light/dark/system and persists", async ({ page }) => {
+  // default = system; Playwright emulates a light OS → starts light, no stored key
   await expect(page.locator("html")).not.toHaveClass(/dark/);
   await page.click("#settingsBtn");
-  await page.locator("#darkToggle").check();
+  await expect(page.locator("#themeSelect")).toHaveValue("system");
+  expect(await page.evaluate(() => localStorage.getItem("redigeerdle:theme"))).toBeNull();
+  // Dark → dark + stored
+  await page.locator("#themeSelect").selectOption("dark");
   await expect(page.locator("html")).toHaveClass(/dark/);
   expect(await page.evaluate(() => localStorage.getItem("redigeerdle:theme"))).toBe("dark");
-  // survives a reload (the head script re-applies it before paint) and the toggle reflects it
+  // survives a reload (head script re-applies before paint) and the select reflects it
   await page.reload();
   await expect(page.locator("html")).toHaveClass(/dark/);
   await page.click("#settingsBtn");
-  await expect(page.locator("#darkToggle")).toBeChecked();
-  // turning it off restores light and persists
-  await page.locator("#darkToggle").uncheck();
+  await expect(page.locator("#themeSelect")).toHaveValue("dark");
+  // Light → not dark + stored "light"
+  await page.locator("#themeSelect").selectOption("light");
   await expect(page.locator("html")).not.toHaveClass(/dark/);
   expect(await page.evaluate(() => localStorage.getItem("redigeerdle:theme"))).toBe("light");
+  // System → clears the key and follows the (light) OS
+  await page.locator("#themeSelect").selectOption("system");
+  await expect(page.locator("html")).not.toHaveClass(/dark/);
+  expect(await page.evaluate(() => localStorage.getItem("redigeerdle:theme"))).toBeNull();
+});
+
+test("Settings: Motion select switches normal/reduced/system and persists", async ({ page }) => {
+  await page.click("#settingsBtn");
+  await expect(page.locator("#motionSelect")).toHaveValue("system");        // default
+  await page.locator("#motionSelect").selectOption("reduced");
+  await expect(page.locator("html")).toHaveClass(/reduce-motion/);
+  expect(await page.evaluate(() => localStorage.getItem("redigeerdle:motion"))).toBe("reduced");
+  await page.reload();                                                       // head script re-applies pre-paint
+  await expect(page.locator("html")).toHaveClass(/reduce-motion/);
+  await page.click("#settingsBtn");
+  await expect(page.locator("#motionSelect")).toHaveValue("reduced");
+  await page.locator("#motionSelect").selectOption("normal");
+  await expect(page.locator("html")).not.toHaveClass(/reduce-motion/);
+  expect(await page.evaluate(() => localStorage.getItem("redigeerdle:motion"))).toBe("normal");
+});
+
+test("Theme/Motion 'system' follow the OS, explicit choices override it", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+  await page.reload();   // head script resolves "system" against the emulated OS
+  await expect(page.locator("html")).toHaveClass(/dark/);
+  await expect(page.locator("html")).toHaveClass(/reduce-motion/);
+  // explicit picks ignore the OS
+  await page.click("#settingsBtn");
+  await page.locator("#themeSelect").selectOption("light");
+  await page.locator("#motionSelect").selectOption("normal");
+  await expect(page.locator("html")).not.toHaveClass(/dark/);
+  await expect(page.locator("html")).not.toHaveClass(/reduce-motion/);
+});
+
+test("a wrong guess rings the input (miss feedback)", async ({ page }) => {
+  await page.fill("#guess", "zzznotarealword");
+  // submitGuess adds .miss synchronously on a 0-hit guess (read it before the 600ms clear)
+  const hasMiss = await page.evaluate(() => { submitGuess(); return document.getElementById("guess").classList.contains("miss"); });
+  expect(hasMiss).toBe(true);
+});
+
+test("'Also visit' opens a modal linking to Jaardle", async ({ page }) => {
+  await page.click("#alsoBtn");
+  await expect(page.locator("#alsomodal")).toHaveClass(/open/);
+  await expect(page.locator('#alsomodal a[href="https://jaardle.nl"]')).toBeVisible();
+});
+
+test("the win banner shows retention CTAs + a next-daily countdown", async ({ page }) => {
+  for (const w of ["golden", "snitch"]) { await page.fill("#guess", w); await page.press("#guess", "Enter"); }
+  await expect(page.locator("#win")).toHaveClass(/show/);
+  await expect(page.locator("#winShareBtn")).toBeVisible();
+  await expect(page.locator("#winNewBtn")).toBeVisible();
+  await expect(page.locator("#nextDaily")).toContainText("Next daily");   // fallback loads as a daily
 });
 
 test("Settings: 'Jump to a word' is on by default and persists when turned off", async ({ page }) => {
@@ -675,14 +729,15 @@ test("the daily-feed dropdown toggles from the header and prompts you to follow 
   await page.click("#feedBtn");
   await expect(page.locator("#feed")).toHaveClass(/open/);
   // no follows set → a prompt (puzzles stubbed empty)
-  await expect(page.locator("#feedCards")).toContainText("Follow fandoms in Settings");
+  await expect(page.locator("#feedCards")).toContainText("Configure dailies");
   // clicking the button again collapses it
   await page.click("#feedBtn");
   await expect(page.locator("#feed")).not.toHaveClass(/open/);
 });
 
-test("Settings: following a fandom persists to localStorage and survives reload (logged out)", async ({ page }) => {
-  await page.click("#settingsBtn");
+test("following a fandom persists to localStorage and survives reload (logged out)", async ({ page }) => {
+  await page.click("#feedBtn");
+  await page.click("#feedConfig > summary");
   await page.locator('#followList input[data-wiki="harrypotter.fandom.com"]').check();
   // written to the local cache
   const stored = await page.evaluate(() => localStorage.getItem("redigeerdle:follows"));
@@ -690,7 +745,8 @@ test("Settings: following a fandom persists to localStorage and survives reload 
   // reload → the choice comes back checked
   await page.reload();
   await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
-  await page.click("#settingsBtn");
+  await page.click("#feedBtn");
+  await page.click("#feedConfig > summary");
   await expect(page.locator('#followList input[data-wiki="harrypotter.fandom.com"]')).toBeChecked();
   await expect(page.locator('#followList input[data-wiki="zelda.fandom.com"]')).not.toBeChecked();
 });

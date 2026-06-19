@@ -365,6 +365,40 @@ return type). Avg-score is over solved plays only, mirroring `avg_guesses` ("to 
 **before** the updated `index.html` ships — otherwise every `plays` upsert (and the My-stats
 query) fails on the unknown column.
 
+## UX feedback & accessibility details
+
+A cluster of small in-game feedback/affordance touches (all in [index.html](index.html)):
+
+- **Wrong-guess ring.** `submitGuess` calls `applyGuess` and, when it returns **0 hits**,
+  `flashMiss(#guess)` adds a `.miss` class for 600ms — a coloured `box-shadow` ring (NOT a
+  shake). It uses **`var(--bad)`** so it's red normally / cb-safe orange in colour-blind mode,
+  and is a `box-shadow` (not `outline`) so it coexists with the yellow `:focus` outline. Its
+  *appearance* is the signal, so it reads even where hue is ambiguous.
+- **Article loading overlay.** `loadArticle` is a thin wrapper that adds `#article.loading`
+  and `finally`-removes it around the real `loadArticleImpl` — so it shows on success AND
+  failure (the random-search retry loop throws per rejected candidate; the overlay rides each
+  try). `initGame` also drops it the moment the new article is drawn. The `.article-loading`
+  child (a CSS `.spinner` + "Loading article…") covers `#article` while the live wiki fetch
+  runs — **visible on mobile too**, where `#status` is `display:none`. The spinner animation
+  is disabled under `html.reduce-motion`.
+- **Screen-reader status.** `#status` is `display:none` on mobile (a hidden `aria-live` won't
+  announce), so there's an **always-present visually-hidden `#srLive`** (`.sr-only`,
+  `role=status aria-live=polite`) that `setStatus()` mirrors every message into — so loading /
+  copied / wrong-guess / win messages are announced on all platforms.
+- **Win/give-up retention.** Under the banner, `.win-cta` shows **Share result** (`#winShareBtn`
+  → `doShare`) + **Play another** (`#winNewBtn` → `openMenu`), and — **dailies only**
+  (`currentShare.kind==="daily"`) — a live **`⏭ Next daily in HH:MM:SS`** countdown
+  (`#nextDaily`). `msToNextDaily()` is ms to the next **Europe/Amsterdam** midnight (matches
+  `todayLocal`); `updateNextDailyCountdown()` is called in `checkWin`/`giveUp` and ticked by
+  the **1s score-clock interval** (added *before* its `playClockRunning()` early-return, so it
+  keeps ticking even though the time-score is frozen at the finish).
+- **Autofocus.** `initGame` focuses `#guess` **only on desktop** (`!mqMobile.matches`) — on
+  mobile autofocus would pop the keyboard and shove the layout on every load.
+- **"Also visit"** (`#alsoBtn` in the header `.controls`, hidden ≤640px like `#statsBtn`;
+  `#optAlsoBtn` in the mobile **Options** menu) opens the static `#alsomodal` — a short
+  Jaardle blurb + an external link to `https://jaardle.nl` (hardcoded/trusted, plain `<a
+  target=_blank rel=noopener>`). Same `.modal` pattern (✕ / backdrop / Esc).
+
 ## Custom link & shared links — any MediaWiki
 
 The "Custom link" game and shared `?wiki=&rev=` links work against **any MediaWiki
@@ -652,10 +686,11 @@ queries: return `[]` for "no row" or `[{...}]` and supabase-js reads element 0.
 Differentiate score GETs (best-score check vs leaderboard list) by the `select=`/embed
 in the request URL or the method.
 
-## Daily-feed follows (Settings)
+## Daily-feed follows (Settings + "Configure dailies")
 
 The header **Settings** button opens a modal with a **Profile** section (real accounts
-only) plus **Preferences** and **Daily feed**:
+only) plus **Preferences** (and a Privacy-policy button). **The Daily-feed config lives in
+the feed drawer, NOT Settings** — see **Configure dailies** below.
 
 **Profile** (`#profileSec`, `hidden` unless `isRealUser()`) — a display-name editor:
 `#displayNameInput` + `#saveNameBtn`. `saveDisplayName()` writes `profiles.username`
@@ -668,19 +703,91 @@ modal is open so it appears/disappears on sign-in/out). No migration — `profil
 update policy already exist.
 
 **Preferences** (device-local prefs, all in `localStorage`):
-- **Dark mode** (`#darkToggle` → `setTheme()`, `redigeerdle:theme`). The palette is a set
+- **Theme** — a **3-state `<select>` `#themeSelect`** (System / Light / Dark) →
+  `setTheme(mode)`/`themePref()`/`applyTheme()`, `redigeerdle:theme`. The palette is a set
   of CSS variables on `:root`; `html.dark` overrides them (`--paper`/`--ink`/`--surface`/
-  `--hintbg`/…). A tiny **head script applies the saved theme before first paint** so there's
-  no light→dark flash on load. The yellow `--marker` (flash/locate highlights) keeps
-  hard-coded dark text in both themes — light text on yellow is unreadable.
+  `--hintbg`/…). **`"system"` is the default and stores NO key** (`themePref()` falls back to
+  `"system"`); `"light"`/`"dark"` store that literal. The **head script applies the resolved
+  theme before first paint** (no flash): `dark` when the pref is `dark`, or `system`/unset AND
+  `prefers-color-scheme: dark`. In `"system"` mode it's kept **live** by a
+  `matchMedia("(prefers-color-scheme: dark)")` `change` listener (added in `loadPrefs`) —
+  explicit Light/Dark ignore the OS (guarded by `themePref()==="system"`). The yellow
+  `--marker` (flash/locate highlights) keeps hard-coded dark text in both themes — light text
+  on yellow is unreadable.
+- **Motion** — a **3-state `<select>` `#motionSelect`** (System / Normal / Reduced) →
+  `setMotion(mode)`/`motionPref()`/`applyMotion()`, `redigeerdle:motion`, toggling the
+  **`html.reduce-motion`** class. CSS `html.reduce-motion` kills the `.topbar`/`.feedpanel`
+  slide transitions + sets `scroll-behavior:auto`; the JS scrolls (`gotoWord`, the ↑/Top
+  buttons) read the **same class** via `scrollMotion()` → `"auto"`. **`"system"` is the
+  default (no key)** and mirrors `prefers-reduced-motion` (head script pre-paint + a live
+  `matchMedia` listener); `"reduced"`/`"normal"` force it on/off, ignoring the OS. Colour-fade
+  `.flash` transitions are **kept** (not motion, and `flashKey` relies on the fade-out to clear
+  the highlight). Replaced the old toggle-less `@media (prefers-reduced-motion)` block.
+- **Colour-blind friendly colours** (`#cbToggle` → `setColorblind()`/`isCb()`,
+  `redigeerdle:cb`, `html.cb`, applied pre-paint by the same head script). The meaning-carrying
+  green/red signals (title-word `.flash-title`, `#titleProgress.complete`, heatmap
+  `.cell.solved`/`.cell.missed` + its legend, `#nameMsg.ok`) read **semantic `--good`/`--bad`
+  vars** (default green `#1f9d55` / themed `--classified` red); `html.cb` swaps them to an
+  **Okabe-Ito-safe blue `#0072b2` / orange `#e8730c`** pair (distinguishable for all common
+  CVD). The ordinary-hit `.flash` stays yellow (`--marker`) — yellow-vs-blue is unambiguous in
+  cb mode. When adding a new colour that distinguishes success/failure, use `--good`/`--bad`,
+  not a hard-coded green/red, or the cb toggle won't cover it.
 - **Jump to a word when you guess it** (`#scrollToggle` → `prefAutoScroll`,
   `redigeerdle:autoscroll`, default on). When on, a correct typed guess scrolls the article
   to that word (via `gotoWord(key, prefAutoScroll)`); when off, it still highlights the word
   but doesn't scroll. `loadPrefs()` reads it at boot, `syncPrefControls()` reflects both
   toggles when the modal opens.
 
-**Daily feed** — a **Homepage daily** picker (`#homeDailySelect`) plus the fandom follow list
-(searchable via `#followSearch` / `filterFollowList()`). Storage follows the rule:
+**Privacy policy** — a **`Privacy policy`** button (`#privacyBtn`) at the very bottom of
+the Settings modal opens the `#privacymodal` (same `.modal` pattern as How to play:
+✕ / backdrop / Esc, styled via `.privacy-body`). It discloses what the game stores (account
+e-mail/name, anonymous guest id, the `plays`/`scores`/`follows` data, device-local
+`localStorage`) and the processors (Supabase, Google OAuth, GitHub Pages, the source wikis,
+the Gemini/Groq hint providers, **Cloudflare Web Analytics** — the cookieless page-view
+beacon in `index.html`'s `<head>`/before `</body>`). The **contact e-mail** is
+`fryingpanpotato@gmail.com`. There is **also a standalone public page
+[privacy.html](privacy.html)** (same text) — this is the URL to give Google's OAuth consent
+screen as the privacy-policy link (the modal isn't a URL). **Keep `privacy.html` in sync with
+the modal text** when the policy changes (two copies, rarely-changing legal text).
+
+**GDPR data rights (account export + deletion).** The privacy modal has a **Your data**
+section (shown only for `isRealUser()`; guests get a "sign in" note):
+- **Download my data** (`exportMyData`) — reads the caller's own `plays`/`scores`/`follows`/
+  `profiles` rows (owner-only RLS scopes them) and triggers a client-side JSON download
+  (`redigeerdle-mydata.json`). No server/edge function — pure client.
+- **Delete my account** (`requestAccountDeletion`) — `confirm()`s, then stamps
+  **`profiles.deletion_requested_at = now()`** (migration
+  [20260618130000_add_account_deletion.sql](supabase/migrations/20260618130000_add_account_deletion.sql);
+  written via the existing owner-only `profiles update own` policy — no new policy, RLS is
+  row- not column-scoped). The UI then shows "scheduled for deletion on <date+7d>" and a
+  **Cancel deletion** (`cancelAccountDeletion`, clears the column back to null). `syncDataRights()`
+  (called when the modal opens) re-reads the flag via `refreshDeletionState()` and toggles the
+  scheduled/cancel UI. **CSS gotcha:** `.data-actions`/`.data-pending` use `:not([hidden])` so the
+  `hidden` attribute still wins (a bare `.x{display:flex}` overrides `[hidden]`).
+- **The actual deletion** is done by **[scripts/purge-deletions.mjs](scripts/purge-deletions.mjs)**,
+  run daily by the **daily-puzzle GitHub Action** (extra step, same `SUPABASE_URL` +
+  `SUPABASE_SERVICE_ROLE_KEY` secrets — no new secret). It selects profiles with
+  `deletion_requested_at` older than **7 days** and hard-deletes each `auth.users` row via the
+  admin API (`DELETE /auth/v1/admin/users/{id}`, service_role). **Every per-user FK cascades from
+  `auth.users`** (`profiles` ON DELETE CASCADE → `scores`/`follows`; `plays` references
+  `auth.users` directly) so one admin delete removes ALL the player's data. Cancelable: a user
+  who clears the flag before the job runs simply isn't in the query. `--dry-run` lists without
+  deleting; `--self-check` verifies the cutoff math offline. **Deploy ordering:** push the
+  migration **before** shipping the client (the client reads/writes `deletion_requested_at`) and
+  before the workflow step can work — the `--dry-run` 400s with "column does not exist" until then.
+  The admin-delete path isn't testable in CI (no prod) — smoke-test once after deploy (schedule a
+  throwaway account, run `--dry-run`, then a real run).
+
+**Configure dailies** — the daily-feed config (**Homepage daily** picker `#homeDailySelect`
++ the fandom follow list, searchable via `#followSearch` / `filterFollowList()`) **moved out
+of Settings into the feed drawer**: it's a native `<details id="feedConfig" class="feed-config">`
+**at the very top of the `#feed` drawer** (above the cards) whose `<summary>` is the
+**"Configure dailies"** button — clicking it *unfolds* the config inline (a 2nd menu in the
+drawer). It renders **lazily on the `toggle` event** (`renderFollowList()` when it opens —
+`openSettings()` no longer calls it); **collapsing it `renderFeed()`s** so a freshly-followed
+fandom shows up in the cards. `onAuth` re-renders the list only if `#feedConfig.open`. The
+`#settingsNote` ("saved to your account" / "on this device") moved into this panel. Storage
+follows the rule:
 **signed in → the `follows` table** (own-only RLS);
 **logged out → `localStorage` (`redigeerdle:follows`)**. On sign-in, local picks are
 merged into the account (`mergeLocalFollowsToAccount`, idempotent upsert). The wiki list
@@ -794,15 +901,37 @@ A dedicated mobile layout is being built incrementally (separate from the
 `880px`/`1600px` desktop breakpoints above), all under one **`@media (max-width:640px)`**
 block.
 
+**No sideways scroll — `.red { max-width:100% }`.** A redaction box's width tracks the word
+length (`buildSpan`: `word.length * 0.55em`, no cap), so a very long word/name would render a
+box **wider than the viewport** and cause horizontal scroll on **any** width. `.red` is capped
+at `max-width:100%` so an over-long box clamps to the column width (length tag still shows);
+normal words are untouched, so nothing extra wraps. Don't remove the cap.
+
+**Status row fits to ~320px.** The `.statusbar` row (score/title-progress pills + the
+**Social** + **Daily metrics** buttons) overflowed at 320px (the "Daily metrics" button ran
+off-screen). The mobile block shrinks `.statusbtns button` (`padding:6px 7px; font-size:.6rem`)
+and tightens the gaps so it stays on **one line** down to 320px — no wrapping (space is
+precious on mobile). Verified at 320×478.
+
 **Mobile header (done): one tidy row.** A `1fr auto 1fr` grid on `header` puts the
-**hamburger** (`#feedBtn`) flush left, the **brand title** (`#homeBtn`) dead-centre, and
-**Sign in/out** (`#authToggle`/`#signOutBtn`) flush right — the two `1fr` side columns
-balance so the title is screen-centred regardless of the side widths. The title still does
-what it does everywhere (`openHomeDaily()` → the configured homepage daily). Hidden here to
-make room: **New game** + **How to play** (in `.brand`) and **Settings** + the signed-in
-name (`.who`) (in `.controls`). `.controls button` is `white-space:nowrap` so "Sign in/out"
-stays on one line down to 320px. The hidden actions move into the **hamburger drawer** on
-mobile (see next).
+**hamburger** (`#feedBtn`) flush left, the **brand title** (`#homeBtn`) dead-centre, and a
+generic **Options** menu (`#optionsBtn`) flush right — the two `1fr` side columns balance so
+the title is screen-centred regardless of the side widths. The title still does what it does
+everywhere (`openHomeDaily()` → the configured homepage daily). Hidden here to make room:
+**New game** + **How to play** (in `.brand`) and **My stats** / **Also visit** / **Settings**
+/ **Sign in/out** + the signed-in name (`.who`) (in `.controls`) — they're collapsed behind
+the **Options** menu (see next). `#optionsBtn` is `display:none` by default and shown only
+`≤640px`; the `≤640px` `.controls` rule hides `#authToggle`/`#signOutBtn` and shows it.
+
+**Mobile Options menu (done).** On mobile the header's right button is **Options**
+(`#optionsBtn`) which opens the **`#optionsmodal`** popup (standard `.modal` pattern — ✕ /
+backdrop / Esc), a vertical `.optmenu` of: **How to play · My stats · Settings · Also visit ·
+Sign in/out**. Each button **closes the popup then delegates to the existing handler**
+(`openStats()` / `openSettings()` / open `#helpmodal` / `#alsomodal`; Sign-in clicks the
+hidden `#authToggle`, Sign-out calls `signOut()`). The **`#optSignIn`/`#optSignOut`** pair is
+toggled by **`renderAuth()`** alongside the header's own `#authToggle`/`#signOutBtn`, so it
+tracks the auth state. This consolidates the utility/account actions that used to crowd the
+feed drawer, freeing it for daily selection (see next).
 
 **Scrollable modals (done).** All popups (`.modal` — New game / Settings / How to play /
 Sign in / Daily metrics) get `overflow-y:auto` + `overscroll-behavior:contain` on the
@@ -811,20 +940,19 @@ whole overlay scrolls, top stays reachable) instead of being clipped — importa
 mobile screens. Mobile also trims the overlay padding to `4vh 10px` (from `9vh 16px`) for
 more usable height. Applies on all widths, but matters most on mobile.
 
-**Mobile drawer actions (done).** New game / Settings / How to play (hidden from the mobile
-header) live at the **bottom of the daily-feed drawer** as `.feed-actions` (`#feedActions`,
-buttons `#feedNewBtn`/`#feedSettingsBtn`/`#feedHelpBtn`), in the order **New game →
-Settings → How to play**. `.feed-actions` is `display:none` by default (desktop has these in
-the header) and `display:flex` only `≤640px`; it's `flex:0 0 auto` so it pins below the
-scrollable `.feed-cards`. Each handler **closes the drawer then calls the same action** as
-the header button (`openMenu()` / `openSettings()` / open `#helpmodal`). This is the mobile
-entry point for dark-mode / homepage-daily / follows (all inside Settings). Because Settings
-is only reachable from the (now-closed) drawer here, **`closeSettings()` reopens the feed
-drawer on mobile** (`mqMobile.matches` → `openFeed()`, which renders), so a freshly-followed
-fandom shows in the feed immediately instead of only after the drawer is reopened by hand;
-desktop keeps the old behaviour (`renderFeed()` only, since the drawer may already be open
-behind Settings). `openFeed()` is the shared open-the-drawer-and-render helper (the
-`#feedBtn` toggle and `closeSettings` both call it).
+**Mobile drawer actions (done).** The daily-feed drawer's bottom bar `.feed-actions`
+(`#feedActions`) now holds **only New game** (`#feedNewBtn`) — Settings / How to play / My
+stats / Also visit **moved into the header Options menu** (above), so the drawer has room for
+daily selection (the user's ask: selecting a daily was cramped). `.feed-actions` is
+`display:none` by default (desktop has New game in `.brand`) and `display:flex` only
+`≤640px`; it's `flex:0 0 auto` so it pins below the scrollable `.feed-cards`. `#feedNewBtn`
+**closes the drawer then `openMenu()`s**. The follow/homepage-daily config lives in the
+drawer's own **Configure dailies** `<details>`, not Settings. **`closeSettings()` just
+`renderFeed()`s** (refreshes the feed content in case the drawer is open behind Settings) and
+does **not** navigate the player into the drawer — Settings now opens from the Options menu
+(mobile) / `.controls` (desktop), not from the feed, and the follow config isn't in Settings,
+so the old mobile `openFeed()`-on-close was obsolete (it dumped you into the feed after ✕).
+`openFeed()` is the shared open-and-render helper (the `#feedBtn` toggle calls it).
 
 **Mobile auto-hide header (done).** On mobile the top bar **hides while scrolling down and
 reappears while scrolling up** (the usual mobile pattern), instead of staying pinned. The
@@ -834,7 +962,10 @@ reserves no gap once you've scrolled past, so the content doesn't jump when it h
 by `matchMedia("(max-width:640px)")` so **desktop keeps the always-pinned sticky bar**; a
 small delta ignores scroll jitter and it never hides within 60px of the top. Leaving mobile
 width clears the class. (`--header-h` is unaffected; the left feed drawer still anchors at
-`top:var(--header-h)`.)
+`top:var(--header-h)`.) **The bar stays pinned while the feed drawer is open** —
+`onScrollHeader` early-returns (removing `.topbar--hidden`) when `#feed.open`, and `openFeed()`
+clears the class — otherwise hiding the bar leaves an empty strip above the drawer (which
+anchors at `--header-h`).
 
 **Mobile article top + Hints popup (done).** On mobile the top of the
 article shows only a **Social** + **Daily metrics** button (`.statusbtns`); the status
@@ -1071,9 +1202,8 @@ anonymous account); the modal shows a "Sign in to keep your stats across devices
 **Button placement** (two entry points, never both visible):
 - **Desktop**: `#statsBtn` in the header `.controls`, just left of **Settings**. Hidden
   `≤640px` (same rule that hides `#settingsBtn`/`.who`).
-- **Mobile**: `#feedStatsBtn` at the **bottom of the hamburger drawer** `.feed-actions`
-  (after New game / Settings / How to play), like the other drawer actions — closes the
-  drawer then calls `openStats()`.
+- **Mobile**: `#optStatsBtn` in the header **Options** menu (`#optionsmodal`) — closes the
+  popup then calls `openStats()`.
 
 **Layout — a source selector on top, then two split sections:**
 - **Source selector** (`#statsSource`, built in JS so option labels use the wiki helpers

@@ -463,7 +463,8 @@ test("Settings: following a fandom saves to the account when signed in", async (
   await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
   await page.evaluate(() => { currentUser = { id: "test-user-id" }; });
 
-  await page.click("#settingsBtn");
+  await page.click("#feedBtn");
+  await page.click("#feedConfig > summary");
   await expect(page.locator("#settingsNote")).toContainText("account");   // signed-in copy
   const hp = page.locator('#followList input[data-wiki="harrypotter.fandom.com"]');
   await hp.check();
@@ -476,7 +477,7 @@ test("Settings: following a fandom saves to the account when signed in", async (
   await expect.poll(() => deletedWiki, { timeout: 5_000 }).toContain("harrypotter.fandom.com");
 });
 
-test("Settings shows each fandom's display name and icon (emoji + image URL)", async ({ page }) => {
+test("the feed config shows each fandom's display name and icon (emoji + image URL)", async ({ page }) => {
   await routeDaily(page);
   await page.route("**/functions/v1/**", r =>
     r.fulfill({ status: 200, contentType: "application/json", body: '{"summary":""}' }));
@@ -491,7 +492,8 @@ test("Settings shows each fandom's display name and icon (emoji + image URL)", a
     ]) }));
   await page.goto("/");
   await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
-  await page.click("#settingsBtn");
+  await page.click("#feedBtn");
+  await page.click("#feedConfig > summary");
 
   const hp = page.locator('#followList .followrow', { hasText: "Harry Potter" });
   await expect(hp.locator(".fname")).toHaveText("Harry Potter");       // display name, not the host
@@ -613,7 +615,7 @@ test("Archive: past dailies list under the feed — featured rows stay neutral, 
   await expect(chips.first()).toContainText("Jun 13");
 });
 
-test("Settings: the homepage-daily picker lists 'Featured daily' + followed fandoms and persists the choice", async ({ page }) => {
+test("Configure dailies: the homepage-daily picker lists 'Featured daily' + followed fandoms and persists the choice", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("redigeerdle:follows",
     JSON.stringify(["harrypotter.fandom.com", "zelda.fandom.com"])));
   await page.route("**/functions/v1/**", r =>
@@ -633,8 +635,9 @@ test("Settings: the homepage-daily picker lists 'Featured daily' + followed fand
   await page.goto("/");
   await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
 
-  // open Settings → the homepage-daily picker
-  await page.click("#settingsBtn");
+  // open the feed drawer → "Configure dailies" → the homepage-daily picker
+  await page.click("#feedBtn");
+  await page.click("#feedConfig > summary");
   const sel = page.locator("#homeDailySelect");
   await expect(sel.locator("option")).toHaveCount(3);          // "Featured daily" + the 2 followed fandoms
   await expect(sel.locator("option").first()).toHaveText("Featured daily");
@@ -645,9 +648,9 @@ test("Settings: the homepage-daily picker lists 'Featured daily' + followed fand
   // picking a fandom persists it device-local…
   await sel.selectOption("zelda.fandom.com");
   expect(await page.evaluate(() => localStorage.getItem("redigeerdle:homedaily"))).toBe("zelda.fandom.com");
-  // …and re-opening Settings reflects the saved choice
-  await page.click("#settingsClose");
-  await page.click("#settingsBtn");
+  // …and collapsing/re-expanding "Configure dailies" reflects the saved choice
+  await page.click("#feedConfig > summary");   // collapse
+  await page.click("#feedConfig > summary");   // re-expand → repopulates from the saved pref
   await expect(page.locator("#homeDailySelect")).toHaveValue("zelda.fandom.com");
 
   // switching back to the general daily clears the stored pref
