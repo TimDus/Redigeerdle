@@ -2938,6 +2938,20 @@ function filterFeedCards() {
 // render has started (or the drawer closed) BEFORE touching the DOM — so all DOM mutation
 // is one atomic synchronous block that only the latest render runs.
 let feedRenderSeq = 0;
+let serverFinishedDailies = new Map();   // play_id -> {solved} for finished dailies, from `plays` (cross-device; localStorage alone under-reports). Built in renderFeed.
+
+// completion status for a daily feed card / archive chip. Server `plays` is definitive
+// (cross-device, survives pruned local state) for FINISHED dailies; local state still
+// supplies the in-progress "…". Guests have no server rows → local only.
+function dailyCardStatus(id) {
+  const sv = serverFinishedDailies.get(id);
+  if (sv) return { glyph: sv.solved ? "✓" : "✗", done: true };
+  const s = readDailyState(id);
+  if (s && s.solved) return { glyph: "✓", done: true };
+  if (s && s.gaveUp) return { glyph: "✗", done: true };
+  if (s && Array.isArray(s.guesses) && s.guesses.length) return { glyph: "…", done: false };
+  return { glyph: "", done: false };
+}
 async function renderFeed() {
   // the feed is a dropdown — only do the work (DB queries included) when it's open.
   // #feedBtn re-renders on open, so nothing is lost by skipping it while closed.
@@ -2977,6 +2991,23 @@ async function renderFeed() {
     archive.sort((a, b) => b.date.localeCompare(a.date) || (b.is_featured ? 1 : 0) - (a.is_featured ? 1 : 0));
   } catch { archive = []; }
 
+  // server-side completion: a real user can finish a daily on another device (or after
+  // local state was pruned), so localStorage alone under-reports. One owner-only `plays`
+  // read marks every finished daily we're about to render (play_id = puzzle id). Guests stay local.
+  serverFinishedDailies = new Map();
+  if (isRealUser()) {
+    const ids = [featured && featured.id, ...puzzles.map(p => p.id), ...archive.map(p => p.id)].filter(Boolean);
+    if (ids.length) {
+      try {
+        const { data } = await supa.from("plays")
+          .select("play_id,solved,gave_up")
+          .eq("user_id", currentUser.id).in("play_id", ids)
+          .or("solved.eq.true,gave_up.eq.true");
+        (data || []).forEach(r => serverFinishedDailies.set(r.play_id, { solved: !!r.solved }));
+      } catch { /* best-effort — fall back to local state */ }
+    }
+  }
+
   // ---- render phase: stale (a newer render started) or drawer closed → bail before
   // touching the DOM. Everything below is synchronous, so no other render can interleave. ----
   if (seq !== feedRenderSeq || !document.getElementById("feed").classList.contains("open")) return;
@@ -2995,10 +3026,9 @@ async function renderFeed() {
     const name = document.createElement("span"); name.className = "fc-name"; name.textContent = "Featured daily";
     card.appendChild(name);
     const st = document.createElement("span"); st.className = "fc-status";
-    const s = readDailyState(featured.id);
-    if (s && s.solved) { st.textContent = "✓"; card.classList.add("done"); }
-    else if (s && s.gaveUp) { st.textContent = "✗"; card.classList.add("done"); }
-    else if (s && Array.isArray(s.guesses) && s.guesses.length) st.textContent = "…";
+    const ds = dailyCardStatus(featured.id);
+    if (ds.glyph) st.textContent = ds.glyph;
+    if (ds.done) card.classList.add("done");
     card.appendChild(st);
     card.addEventListener("click", () => { closeFeed(); loadPuzzle().then(renderFeed); });
     cards.appendChild(card);
@@ -3020,10 +3050,9 @@ async function renderFeed() {
     const st = document.createElement("span"); st.className = "fc-status";
     if (!p) { st.textContent = "—"; card.title = "No daily yet today"; }
     else {
-      const s = readDailyState(p.id);
-      if (s && s.solved) { st.textContent = "✓"; card.classList.add("done"); }
-      else if (s && s.gaveUp) { st.textContent = "✗"; card.classList.add("done"); }
-      else if (s && Array.isArray(s.guesses) && s.guesses.length) st.textContent = "…";
+      const ds = dailyCardStatus(p.id);
+      if (ds.glyph) st.textContent = ds.glyph;
+      if (ds.done) card.classList.add("done");
       card.addEventListener("click", () => { closeFeed(); loadPuzzlePointer(p, { revealFandom: true }).then(renderFeed); });
     }
     card.appendChild(st);
@@ -3095,12 +3124,9 @@ function openArchiveModal(g, name) {
     const chip = document.createElement("button");
     chip.className = "archdate";
     if (p.id === dailyPuzzleId) chip.classList.add("active");
-    const s = readDailyState(p.id);
-    let glyph = "";
-    if (s && s.solved) { glyph = " ✓"; chip.classList.add("done"); }
-    else if (s && s.gaveUp) { glyph = " ✗"; chip.classList.add("done"); }
-    else if (s && Array.isArray(s.guesses) && s.guesses.length) glyph = " …";
-    chip.textContent = shortDate(p.date) + glyph;
+    const ds = dailyCardStatus(p.id);
+    if (ds.done) chip.classList.add("done");
+    chip.textContent = shortDate(p.date) + (ds.glyph ? " " + ds.glyph : "");
     chip.addEventListener("click", () => {
       document.getElementById("archivemodal").classList.remove("open");
       closeFeed();
@@ -4737,7 +4763,7 @@ function pruneOldDailyState() {
   openHomeDaily();
 })();
 </script>
-<!-- Cloudflare Web Analytics — cookieless page-view/referrer/browser stats. -->
-<script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "516f7aa135004ce2b62ec1671e133ab5"}'></script>
+<!-- Cloudflare Web Analytics — cookieless. ponytail: skip on localhost/127.*/file:// so test runs don't pollute prod stats. -->
+<script>var h=location.hostname;if(h&&h!=="localhost"&&!h.startsWith("127.")&&h!=="0.0.0.0"&&h!=="::1"&&h!=="[::1]"){var s=document.createElement("script");s.defer=true;s.src="https://static.cloudflareinsights.com/beacon.min.js";s.setAttribute("data-cf-beacon",'{"token":"516f7aa135004ce2b62ec1671e133ab5"}');document.head.appendChild(s);}</script>
 </body>
 </html>

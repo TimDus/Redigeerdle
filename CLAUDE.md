@@ -1324,6 +1324,14 @@ wrap-grid). Clicking a date loads it (`loadPuzzlePointer`, closing both popup + 
   stats, the heatmap (keyed by `puzzle_date`, so it greens the right day), and the
   `daily_metrics` completion aggregate. Replay-block + `restoreFinishedFromServer` already work
   per-puzzle, so a daily you finished before shows ✓/✗ and re-locks.
+- **Completion status (✓/✗/…) is server-backed.** The feed cards AND the archive date chips
+  show their status via **`dailyCardStatus(id)`**: for a real signed-in user a daily can be
+  finished on **another device** (or its local state pruned by `pruneOldDailyState`, 60d), so
+  `readDailyState` alone under-reports. `renderFeed` does **one owner-only `plays` read** for all
+  rendered ids (featured + today's follows + archive; `play_id = puzzle id`, finished = `solved OR
+  gave_up`) into the module map **`serverFinishedDailies`**; `dailyCardStatus` prefers it for the
+  ✓/✗, then falls back to local state for the in-progress "…" (guests have no server rows → local
+  only). Best-effort — a failed query just falls back to local.
 - **Filter**: `filterFeedCards` selects `#feedCards > .feedcard` (DIRECT children) so the
   archive cards (which live inside the `<details>`) are untouched by the live feed search.
 - Covered in [tests/supabase.spec.mjs](tests/supabase.spec.mjs) ("Archive: past dailies list…").
