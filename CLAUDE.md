@@ -117,9 +117,18 @@ a standalone Node script run by GitHub Actions.
     `writeCache`, [supabase/functions/hint/index.ts](supabase/functions/hint/index.ts)) checks
     `hint_cache` before generating and seeds it after, on **both** paths. **`puzzles.summary`
     still fronts it per-puzzle** — a daily that already generated never looks here again; the
-    cache only pays off on the *first* generation for each article. **Staleness guard:** a
-    cached packet older than `CACHE_STALE_MS` (**180d**) is treated as a miss and regenerated,
-    so a substantially-rewritten page eventually refreshes. **Anti-poisoning:** because dailies
+    cache only pays off on the *first* generation for each article. **Staleness guard is
+    revision-keyed, not age-keyed:** each entry stores the `revision_id` it was generated from
+    (migration [20260619120000_add_hint_cache_revision.sql](supabase/migrations/20260619120000_add_hint_cache_revision.sql)),
+    and a cached packet stays fresh **forever as long as the article hasn't been edited** — a
+    request whose pinned revision **equals or is older than** the cached one is a hit *at any
+    age*; only a **newer** requested revision (the page changed since we cached) forces a regen.
+    The old `CACHE_STALE_MS` (**180d**) age guard is now only a **fallback** for when a revision
+    is missing on either side (pre-migration rows, or a caller that sent none). Because the
+    stored revision only ever moves up (we regenerate only when current > cached), an old
+    archived daily re-reading the cache returns the newer packet rather than downgrading it.
+    **Push the migration before deploying the updated function** (it degrades to the age guard
+    until the `revision_id` column exists). **Anti-poisoning:** because dailies
     read this shared cache too, the packet is always generated from the **server-derived**
     authoritative title (`fetchPageInfo(wiki, revisionId)` — one query yielding `{title,
     pageId}`) and stored under the **server-derived** `page_id`, never the caller's. The
@@ -143,8 +152,23 @@ a standalone Node script run by GitHub Actions.
   opens/closes the `#hintsmodal` popup). The panel is rebuilt by **`renderHints()`** — a
   **Reveal a word** row first, then one row per tier, least→most revealing: **Reveal a word
   → Category → Summary → First sentence → Letters → Synonym → Source**. Each tier has its
-  own **Reveal** button (`revealTier(key)`) whose label shows the next purchase cost
-  (`nextRevealCost(key)`). `category`/`summary`/`synonym`
+  own **Reveal** button (`revealTier(key)`) showing **just the next purchase cost** as a compact
+  chip (e.g. `"+10"`, `nextRevealCost(key)` via `revealButton()`) — no "Reveal" word, so the row
+  fits one line at any width; the action/meaning is carried by the row label + ⓘ, and the button
+  gets an `aria-label`/`title` ("Reveal <tier> — costs N points", `tierName()`) for screen
+  readers. Each row also carries a small **ⓘ toggle** (`.hint-info`,
+  `appendTierInfo()`) that shows/hides a one-line explanation of what that tier reveals
+  (text in **`HINT_HELP`**) — it exists chiefly to clear up that **Summary describes the whole
+  ARTICLE, not the title**. The text is also the button's `title=` (free desktop hover); the
+  click-toggled `.hint-help` line is what works on mobile. **Layout:** the `.hint-tier` row is
+  a **no-wrap** flex of label + ⓘ + button (so they stay on **one line** — on narrow mobile the
+  label shrinks/ellipsises rather than the button wrapping below it); the `.hint-help`
+  explanation is **lifted OUT of the row** to sit as a block beneath it by **`pushRow()`** (used
+  at every `box.appendChild(row)` site). Because the buttons are just a tiny cost chip, every
+  row (incl. the long `reveal_word`/`first_sentence` labels) fits one line down to ~320px without
+  truncating — the reveal-word count/limit lives in its ⓘ help. NB the `.hint-info:hover` rule
+  must out-specify the global `button:hover` red fill (scoped under `.hint-tier`).
+  `category`/`summary`/`synonym`
   come from the AI packet (revealed instantly if already fetched, else lazily generated);
   **First sentence** and **Letters** are **derived locally from the article + title** (no
   Groq, no leak filter — see below); **Source** folds in the old `showFandom`
@@ -839,7 +863,10 @@ boolean for this). Once the dailies roll over at local (Europe/Amsterdam) midnig
 same article *with your progress*** (a random game stays a random game); **first visit of a
 new day → your configured homepage daily**. (`?p=daily` still forces the featured daily
 regardless; `?d=`/`?g=`/`?wiki=&rev=` shared links still open their target directly — and a
-`?g=` reload also resumes solo progress, since it routes through `loadFromRevision` too.)
+`?g=` reload also resumes solo progress, since it routes through `loadFromRevision` too.) A
+shared **`?d=` link reveals its fandom for free** on open (`loadDailyForWiki(wiki, {revealFandom:
+true})`) — a `?d=` link is *by construction* a specific (non-featured) fandom daily, so the
+sharer already picked it; the featured daily shares as `?p=daily` and stays hidden.
 `lastGame()` reads the new key and **falls back to the legacy `redigeerdle:lastdaily`** so a
 player mid-daily across the upgrade still resumes.
 

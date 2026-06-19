@@ -91,24 +91,32 @@ async function fetchPageInfo(wiki: string, revisionId: number | string): Promise
 // generated once is reused forever — across dailies on different dates, archived replays
 // and (popular) random games for the same page — saving the rate-limited LLM call. The
 // stored `packet` is the same leak-filtered JSON string as puzzles.summary (no title).
-const CACHE_STALE_MS = 180 * 24 * 60 * 60 * 1000;   // packets older than this → regenerate (handle heavily-rewritten pages)
+const CACHE_STALE_MS = 180 * 24 * 60 * 60 * 1000;   // fallback only (no revision info): packets older than this → regenerate
 
-async function readCache(admin, wikiHost: string, pageId: number): Promise<string | null> {
+// A cache entry is fresh as long as the article hasn't been edited since we cached it.
+// revision_id bumps on EVERY edit, so when we know both the cached and the requested
+// revision we ignore age entirely: only a NEWER requested revision (the page changed)
+// is a miss. We fall back to the 180d age guard only when a revision is missing on either
+// side (pre-migration rows, or a caller that didn't send one).
+async function readCache(admin, wikiHost: string, pageId: number, revisionId?: number | string): Promise<string | null> {
   if (!admin || !wikiHost || pageId == null || Number.isNaN(pageId)) return null;
   try {
-    const { data } = await admin.from("hint_cache").select("packet, updated_at")
+    const { data } = await admin.from("hint_cache").select("packet, updated_at, revision_id")
       .eq("wiki_host", wikiHost).eq("page_id", pageId).maybeSingle();
     if (!data?.packet) return null;
-    if (Date.now() - new Date(data.updated_at).getTime() > CACHE_STALE_MS) return null;   // stale → treat as a miss
+    const cur = Number(revisionId), cached = Number(data.revision_id);
+    if (cur && cached) return cur > cached ? null : data.packet;   // newer content → miss; same/older → hit (any age)
+    if (Date.now() - new Date(data.updated_at).getTime() > CACHE_STALE_MS) return null;   // no revision info → age guard
     return data.packet;
   } catch { return null; }   // table missing / DB error → just a cache miss
 }
 
-async function writeCache(admin, wikiHost: string, pageId: number, packet: string): Promise<void> {
+async function writeCache(admin, wikiHost: string, pageId: number, packet: string, revisionId?: number | string): Promise<void> {
   if (!admin || !wikiHost || pageId == null || Number.isNaN(pageId) || !packet) return;
+  const rev = Number(revisionId);
   // best-effort — a cache write must never break the response
   await admin.from("hint_cache")
-    .upsert({ wiki_host: wikiHost, page_id: pageId, packet, updated_at: new Date().toISOString() })
+    .upsert({ wiki_host: wikiHost, page_id: pageId, packet, revision_id: rev || null, updated_at: new Date().toISOString() })
     .then(() => {}, () => {});
 }
 
@@ -294,15 +302,15 @@ Deno.serve(async (req) => {
       // fast read-probe with the caller's pageId. Harmless if it's wrong/bogus: packets are
       // leak-filtered (no title), and a bad key just misses. On a hit we touch neither
       // MediaWiki nor the LLM — the whole point of the cache.
-      const cached = await readCache(admin, wiki, Number(pageId));
+      const cached = await readCache(admin, wiki, Number(pageId), revisionId);
       if (cached) return json({ summary: cached, status: "ready" });
       // miss → derive the AUTHORITATIVE identity from (wiki, revisionId) so a poisoned caller
       // title can't pollute the shared cache (a daily later reads it too). Generate from the
-      // derived title and cache under the real page_id. If the derive fails (network), still
-      // generate from the caller title but DON'T cache — degrade without poisoning.
+      // derived title and cache under the real page_id + this revision. If the derive fails
+      // (network), still generate from the caller title but DON'T cache — degrade without poisoning.
       const info = await fetchPageInfo(wiki, revisionId);
       const hint = await generate(info?.title || title, text, categories);
-      if (hint && info) await writeCache(admin, wiki, info.pageId, hint);
+      if (hint && info) await writeCache(admin, wiki, info.pageId, hint, revisionId);
       return json({ summary: hint, status: "ready" });
     }
 
@@ -343,11 +351,11 @@ Deno.serve(async (req) => {
         const info = await fetchPageInfo(row?.wiki, row?.revision_id);
         // cross-puzzle cache: a DIFFERENT daily (another date) or a random game for the SAME
         // article may already have generated this packet — reuse it, no LLM call.
-        let hint = info ? await readCache(admin, row?.wiki, info.pageId) : null;
+        let hint = info ? await readCache(admin, row?.wiki, info.pageId, row?.revision_id) : null;
         if (!hint) hint = await generate(info?.title || title, text, categories);
         if (hint) {
           await admin.from("puzzles").update({ summary: hint }).eq("id", puzzleId);
-          if (info) await writeCache(admin, row?.wiki, info.pageId, hint);   // seed the shared cache for future puzzles
+          if (info) await writeCache(admin, row?.wiki, info.pageId, hint, row?.revision_id);   // seed the shared cache for future puzzles
           return json({ summary: hint, status: "ready" });
         }
         // no usable hint → release the claim so a later click can retry.
