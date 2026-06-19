@@ -2121,7 +2121,10 @@ async function loadArticleImpl(apiBase, wikiLabel, parseParams, opts = {}) {
   // when the player explicitly chose this fandom (Random from a fandom), it's no
   // longer a secret — reveal the source tier. The daily path reveals *after*
   // restoreDailyState (in loadPuzzlePointer), so it can't clobber progress.
-  if (opts.revealFandom && !opts.daily) revealSource(true);   // free: player chose this fandom
+  // load the wiki display-names first so the Source shows the wiki's real name ("The Lord of
+  // the Rings") rather than the stripped host ("lotr") — a bare share-link load never opened
+  // the picker/feed that normally populates the list.
+  if (opts.revealFandom && !opts.daily) { await getWikiList().catch(() => {}); revealSource(true); }   // free: player chose this fandom
   // multiplayer: a New-game flow picked a mode → open the room now that the article loaded
   if (!opts.daily && pendingMpMode) { const m = pendingMpMode; pendingMpMode = null; mp.createRoom(m); }
 }
@@ -2207,11 +2210,11 @@ async function loadFromWikiUrl(rawUrl) {
   }
 }
 
-async function loadFromRevision(wiki, rev) {
+async function loadFromRevision(wiki, rev, { revealFandom = false } = {}) {
   const status = document.getElementById("status"); status.className = "status";
   try {
     const apiBase = await resolveApiBase("https://" + wiki);   // handles /api.php vs /w/api.php
-    await loadArticle(apiBase, wiki, { oldid: rev });
+    await loadArticle(apiBase, wiki, { oldid: rev }, { revealFandom });   // revealFandom: a `?g=&s=1` shared chosen-fandom game
     return true;
   } catch (e) {
     status.className = "status err";
@@ -2557,7 +2560,10 @@ function rememberLastGame() {
 function buildShareUrl() {
   const base = location.origin + location.pathname;
   if (currentShare.kind === "custom" && currentShare.wiki && currentShare.rev) {
-    return base + "?g=" + encodeCustom(currentShare.wiki, currentShare.rev);
+    // when the source was a CHOSEN fandom (a "Random from a fandom" game — sourceFree), the
+    // fandom isn't a secret, so flag the link to reveal it for the recipient too (matches the
+    // `?d=` daily behaviour). A curated/full-random share has no flag → source stays a hint.
+    return base + "?g=" + encodeCustom(currentShare.wiki, currentShare.rev) + (sourceFree ? "&s=1" : "");
   }
   // a non-featured feed daily links to that fandom's daily; the featured home daily stays `?p=daily`
   if (currentShare.kind === "daily" && !dailyFeatured && currentShare.wiki) {
@@ -3218,6 +3224,9 @@ const HINT_EXCERPT_CHARS = 6000;
 async function loadPuzzlePointer(p, { revealFandom = false, archive = false } = {}) {
   const date = p.date || p.id || null;
   const apiBase = await resolveApiBase("https://" + p.wiki);   // /api.php vs /w/api.php (e.g. Wikipedia)
+  // load display-names so a revealed source shows the wiki's real name, not the stripped host
+  // (a bare shared `?d=` link never opened the picker/feed that normally populates the list).
+  if (revealFandom) await getWikiList().catch(() => {});
   // status line: when the player picked this fandom, name it nicely (as in Settings);
   // otherwise stay neutral — the featured/home daily and shared links must NOT leak the
   // fandom (the puzzle id contains the host, so don't show it there).
@@ -4798,7 +4807,9 @@ function pruneOldDailyState() {
   const decoded = g ? decodeCustom(g) : null;
   const wiki = decoded ? decoded.wiki : q.get("wiki");
   const rev = decoded ? decoded.rev : q.get("rev");
-  if (wiki && rev) { loadFromRevision(wiki, rev); return; }
+  // `&s=1` marks a shared chosen-fandom game (Random from a fandom) → reveal the source for free,
+  // like a `?d=` daily. (A reload-resume restores its own sourceFree from the saved solo state.)
+  if (wiki && rev) { loadFromRevision(wiki, rev, { revealFandom: q.get("s") === "1" }); return; }
   const dailyWiki = q.get("d") ? decodeDaily(q.get("d")) : null;
   // a shared `?d=` link is, by construction, a specific (non-featured) fandom daily — the
   // sharer picked that fandom, so reveal it for the recipient (free; featured stays `?p=daily`).

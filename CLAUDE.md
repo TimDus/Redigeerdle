@@ -870,6 +870,19 @@ sharer already picked it; the featured daily shares as `?p=daily` and stays hidd
 `lastGame()` reads the new key and **falls back to the legacy `redigeerdle:lastdaily`** so a
 player mid-daily across the upgrade still resumes.
 
+**Shared `?g=` source reveal — the `&s=1` flag.** A solo share is `?g=<encodeCustom(wiki,rev)>`.
+When the shared game's source was a **chosen fandom** (a *Random from a fandom* game — `sourceFree`
+true), `buildShareUrl()` appends **`&s=1`**, and boot passes `revealFandom` to `loadFromRevision`
+→ `loadArticle({revealFandom})` → `revealSource(true)`, so the recipient gets the source revealed
+**for free** (same idea as `?d=`). A curated/full-random or custom-link share has **no flag** → the
+source stays a hidden, payable hint (the invariant holds; note the wiki host is still decodable
+from the `?g=` token, so this is UI concealment, not a secret). **Source label fix:** the Source
+tier / status line name a wiki via `labelForHost()`, which needs the cached `wikis` list
+(`display_name`) — a bare shared link never opened the picker/feed that loads it, so it fell back
+to the **stripped host** ("lotr" instead of "The Lord of the Rings"). Both reveal paths now
+`await getWikiList()` before revealing (`loadArticle` for `?g=`/random, `loadPuzzlePointer` for
+`?d=`/feed), so the real display name shows.
+
 **Solo-game progress persistence.** Dailies persist progress per-puzzle
 (`redigeerdle:daily:<id>`, replayed by `restoreDailyState`); solo (random/custom) games now
 persist to **one** slot, `redigeerdle:sologame` (`SOLO_STATE_KEY`). There's only ever one

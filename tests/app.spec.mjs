@@ -281,6 +281,38 @@ test("a chosen-fandom source is shown but FREE — it isn't scored or listed as 
   expect(await page.evaluate(() => buildShareText())).toContain("🏷️ source");
 });
 
+test("a 'Random from a fandom' share URL flags the source to reveal; a hidden-source share doesn't", async ({ page }) => {
+  // a chosen-fandom (Random from a fandom) game is a custom share with sourceFree → the `?g=`
+  // link carries `&s=1` so the recipient gets the source revealed for free, like a `?d=` daily.
+  const url = await page.evaluate(() => {
+    currentShare = { kind: "custom", wiki: "harrypotter.fandom.com", rev: "123" };
+    sourceFree = true;
+    return buildShareUrl();
+  });
+  expect(url).toContain("?g=");
+  expect(url).toContain("&s=1");
+  // a curated/full-random or custom-link share (source was a hidden, payable hint) has NO flag.
+  const hidden = await page.evaluate(() => { sourceFree = false; return buildShareUrl(); });
+  expect(hidden).toContain("?g=");
+  expect(hidden).not.toContain("s=1");
+});
+
+test("a shared chosen-fandom link reveals the source by its display name, not the stripped host", async ({ page }) => {
+  // wikis WITH a display_name. The bug: a bare share-link load never fetched the wiki list, so
+  // the revealed Source showed the stripped host ("harrypotter") instead of "Harry Potter Wiki".
+  // The reveal path now awaits getWikiList() first.
+  await page.route("**/rest/v1/wikis**", route =>
+    route.fulfill({ status: 200, contentType: "application/json",
+      body: '[{"host":"harrypotter.fandom.com","display_name":"Harry Potter Wiki"}]' }));
+  const token = await page.evaluate(() => encodeCustom("harrypotter.fandom.com", "2006074"));   // pinned Golden Snitch rev (puzzle.json)
+  await page.goto("/?g=" + token + "&s=1");                                                      // &s=1 → reveal the source for free
+  await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
+  const src = await page.evaluate(() => tierContent("source"));
+  expect(src).toContain("Harry Potter Wiki");      // the display name…
+  expect(src).not.toContain("Source: harrypotter");// …not the stripped host
+  expect(await page.evaluate(() => sourceFree)).toBe(true);
+});
+
 test("Letters tier: each reveal uncovers the next title letter at an escalating cost", async ({ page }) => {
   await page.click("#hintsBtn");
   const row = page.locator('.hint-tier[data-tier="first_letter"]');
