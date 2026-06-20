@@ -657,6 +657,7 @@
       </label>
       <label class="setrow"><input type="checkbox" id="cbToggle"><span>Colour-blind friendly colours</span></label>
       <label class="setrow"><input type="checkbox" id="scrollToggle"><span>Jump to a word when you guess it</span></label>
+      <label class="setrow"><input type="checkbox" id="clickRevealToggle"><span>Click a word to reveal it (while you have reveals left)</span></label>
       <div class="settings-divider"></div>
       <button id="privacyBtn" class="ghost">Privacy policy</button>
     </div>
@@ -1134,6 +1135,8 @@ let wordNav = new Map();
 let currentNavKey = null;   // the word currently being navigated
 // preference: scroll the article to a word when you guess it correctly (Settings)
 let prefAutoScroll = true;
+// preference: click a body word to reveal it directly (skips arming reveal mode), while reveals remain (Settings)
+let prefClickReveal = false;
 // remove any existing locate highlights from the body
 function clearLocate() {
   document.querySelectorAll('#body .locate, #body .locate-active')
@@ -1393,10 +1396,18 @@ function applyGuess(key, raw, isHint, remote) {
 
 function submitGuess() {
   const input = document.getElementById("guess");
-  const raw = input.value.trim(); const key = norm(raw); input.value = "";
+  const raw = input.value.trim(); input.value = "";
   updateGuessCount();
-  if (!key || guessed.has(key)) return;
-  if (applyGuess(key, raw, false) === 0) flashMiss(input);   // 0 hits → wrong-guess border
+  // split multi-word input on whitespace → one guess per word ("my arm" → "my", "arm")
+  let attempted = 0, missed = false;
+  raw.split(/\s+/).forEach(part => {
+    const key = norm(part);
+    // skip empties, already-guessed words, and pre-revealed STOP words ("the") — they don't count
+    if (!key || guessed.has(key) || STOP.has(key)) return;
+    attempted++;
+    if (applyGuess(key, part, false) === 0) missed = true;
+  });
+  if (attempted && missed) flashMiss(input);   // any typed word with 0 hits → wrong-guess border
 }
 // briefly ring the guess input (a colour cue, no shake) when a typed guess hit nothing
 function flashMiss(input) {
@@ -1439,7 +1450,10 @@ function toggleArm() {
 }
 
 function handleBodyClick(e) {
-  if (!revealArmed) return;
+  // reveal either when the arm-mode is on, OR when the click-to-reveal pref lets a plain
+  // click spend a reveal directly (only while reveals remain and the game is live)
+  const direct = prefClickReveal && !revealArmed && hintsLeft > 0 && !solved && !gaveUp;
+  if (!revealArmed && !direct) return;
   const body = document.getElementById("body");
   const span = e.target.closest(".red");
   if (!span || !body.contains(span) || span.classList.contains("shown")) return;
@@ -2763,6 +2777,7 @@ function setColorblind(on) {
 // (the explicit light/dark/normal/reduced choices ignore the OS, so they're guarded by the pref)
 function loadPrefs() {
   try { prefAutoScroll = localStorage.getItem("redigeerdle:autoscroll") !== "0"; } catch { prefAutoScroll = true; }
+  try { prefClickReveal = localStorage.getItem("redigeerdle:clickreveal") === "1"; } catch { prefClickReveal = false; }
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (themePref() === "system") applyTheme("system"); });
   matchMedia("(prefers-reduced-motion: reduce)").addEventListener("change", () => { if (motionPref() === "system") applyMotion("system"); });
 }
@@ -2772,6 +2787,7 @@ function syncPrefControls() {
   document.getElementById("motionSelect").value = motionPref();
   document.getElementById("cbToggle").checked = isCb();
   document.getElementById("scrollToggle").checked = prefAutoScroll;
+  document.getElementById("clickRevealToggle").checked = prefClickReveal;
   syncProfileControls();
 }
 // the display-name editor is only for real accounts (guests have no profile row)
@@ -4140,6 +4156,10 @@ document.getElementById("cbToggle").addEventListener("change", e => setColorblin
 document.getElementById("scrollToggle").addEventListener("change", e => {
   prefAutoScroll = e.target.checked;
   try { localStorage.setItem("redigeerdle:autoscroll", prefAutoScroll ? "1" : "0"); } catch { /* storage blocked */ }
+});
+document.getElementById("clickRevealToggle").addEventListener("change", e => {
+  prefClickReveal = e.target.checked;
+  try { localStorage.setItem("redigeerdle:clickreveal", prefClickReveal ? "1" : "0"); } catch { /* storage blocked */ }
 });
 document.getElementById("settingsClose").addEventListener("click", closeSettings);
 document.getElementById("settingsmodal").addEventListener("click", e => {

@@ -761,6 +761,12 @@ update policy already exist.
   to that word (via `gotoWord(key, prefAutoScroll)`); when off, it still highlights the word
   but doesn't scroll. `loadPrefs()` reads it at boot, `syncPrefControls()` reflects both
   toggles when the modal opens.
+- **Click a word to reveal it** (`#clickRevealToggle` → `prefClickReveal`,
+  `redigeerdle:clickreveal`, **default off**). When on, a plain click on a body word spends a
+  free-word reveal directly — `handleBodyClick` allows the reveal when `prefClickReveal &&
+  !revealArmed && hintsLeft > 0 && !solved && !gaveUp` (the `direct` branch), so you skip
+  arming reveal-mode from the Hints panel. Same reveal/cost/co-op-broadcast path as the armed
+  flow (title words still locked).
 
 **Privacy policy** — a **`Privacy policy`** button (`#privacyBtn`) at the very bottom of
 the Settings modal opens the `#privacymodal` (same `.modal` pattern as How to play:
