@@ -317,12 +317,14 @@
        article. Inside the modal it shows flush (no extra margin) and scrolls with the
        modal itself. */
     #hintsModalBody > .hintbox { margin:0; }
-    /* keep label + ⓘ + Reveal button on ONE line (the row is no-wrap; the .hint-help line sits
-       below it). The label shrinks (ellipsis) to make room and the button gets a smaller font
-       so the label rarely has to truncate. */
+    /* keep label + ⓘ + Reveal button on ONE line. The label shrinks (ellipsis) to make room
+       and the button gets a smaller font so the label rarely has to truncate. But once a hint
+       is REVEALED, its value drops to its own full-width line and WRAPS (a summary/sentence/
+       synonym doesn't fit on one line) instead of being clipped to an ellipsis. */
+    .hint-tier { flex-wrap:wrap; }
     .hint-tier-label { min-width:0; flex:0 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .hint-reveal { flex:0 0 auto; font-size:.66rem; padding:3px 7px; }
-    .hint-tier-val { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .hint-tier-val { flex:1 1 100%; min-width:0; white-space:normal; overflow-wrap:anywhere; }
   }
 
   article { font-size:1.08rem; }
@@ -463,14 +465,12 @@
   .feedcard.empty { cursor:default; opacity:.55; }
   .feedcard .fc-status { font-weight:700; color:var(--classified); }
   .feed-empty { font-family:var(--mono); font-size:.74rem; color:var(--muted); }
-  /* Configure dailies: collapsible config at the top of the drawer (native <details>) */
-  .feed-config { flex:0 0 auto; }
-  .feed-config > summary { cursor:pointer; list-style:none; padding:9px 11px; font-family:var(--mono); font-weight:700; font-size:.76rem; text-transform:uppercase; letter-spacing:.06em; border:1px solid var(--ink); background:var(--surface); color:var(--ink); }
-  .feed-config > summary::-webkit-details-marker { display:none; }
-  .feed-config > summary::after { content:"▸"; float:right; }
-  .feed-config[open] > summary::after { content:"▾"; }
-  .feed-config > summary:hover, .feed-config[open] > summary { background:var(--paper); }
-  .feed-config-body { padding:10px 2px 2px; }
+  /* Configure dailies: a button at the top of the drawer that opens the #configmodal popup */
+  .feed-config-btn { flex:0 0 auto; cursor:pointer; padding:9px 11px; font-family:var(--mono); font-weight:700; font-size:.76rem; text-transform:uppercase; letter-spacing:.06em; border:1px solid var(--ink); background:var(--surface); color:var(--ink); text-align:left; }
+  .feed-config-btn::after { content:"\2699"; float:right; }   /* gear: this opens a config popup */
+  .feedpanel .feed-config-btn:hover:not(:disabled) { background:var(--paper); color:var(--ink); border-color:var(--ink); }
+  /* config popup body: spacing for the homepage-daily row above the follow list */
+  #configmodal .opt-d { margin:2px 0 10px; }
   /* Archive: collapsible list of past dailies (native <details>) */
   .feed-archive { border-top:1px solid var(--line); margin-top:4px; padding-top:4px; }
   .feed-archive > summary { cursor:pointer; padding:8px 4px; font-family:var(--mono); font-size:.76rem; color:var(--muted); }
@@ -558,19 +558,7 @@
       <span class="feed-h">Your daily feed</span>
       <button class="feed-x" id="feedClose" aria-label="Close daily feed">&times;</button>
     </div>
-    <details class="feed-config" id="feedConfig">
-      <summary>Configure dailies</summary>
-      <div class="feed-config-body">
-        <div class="note" id="settingsNote"></div>
-        <label class="setrow setrow-sel" for="homeDailySelect">
-          <span>Homepage daily</span>
-          <select id="homeDailySelect" class="home-daily-sel"></select>
-        </label>
-        <div class="opt-d">Which daily opens on the homepage — the featured “general” daily, or one of your followed fandoms.</div>
-        <input id="followSearch" class="follow-search" type="text" placeholder="search fandoms…" autocomplete="off">
-        <div class="followlist" id="followList"></div>
-      </div>
-    </details>
+    <button class="feed-config-btn" id="feedConfigBtn">Configure dailies</button>
     <input id="feedSearch" class="feed-search" type="text" placeholder="search feed…" autocomplete="off" hidden>
     <div class="feed-cards" id="feedCards"></div>
     <div class="feed-actions" id="feedActions">
@@ -594,13 +582,9 @@
           </button>
         </div>
         <div class="mpmodemsg" id="mpModeMsg" hidden></div>
-        <button class="opt-card" id="curatedBtn">
-          <span class="opt-t">Curated random</span>
-          <span class="opt-d">A quality-checked article — same search as the daily.</span>
-        </button>
-        <button class="opt-card" id="fullRandomBtn">
-          <span class="opt-t">Full random</span>
-          <span class="opt-d">Anything from the wikis — no filter, total wild card.</span>
+        <button class="opt-card" id="myFandomsBtn">
+          <span class="opt-t">Random from my fandoms</span>
+          <span class="opt-d">A quality-checked page from one of the fandoms you follow.</span>
         </button>
         <button class="opt-card" id="fandomRandomBtn">
           <span class="opt-t">Random from a fandom</span>
@@ -620,6 +604,14 @@
           <button id="loadUrlBtn">Load</button>
         </div>
         <div class="ownmsg" id="urlMsg" role="alert" aria-live="polite"></div>
+        <button class="opt-card" id="curatedBtn">
+          <span class="opt-t">Curated random</span>
+          <span class="opt-d">A quality-checked article — same search as the daily.</span>
+        </button>
+        <button class="opt-card" id="fullRandomBtn">
+          <span class="opt-t">Full random</span>
+          <span class="opt-d">Anything from the wikis — no filter, total wild card.</span>
+        </button>
       </div>
     </div>
   </div>
@@ -772,12 +764,11 @@
       <h2 class="modal-title">How to play</h2>
       <ul class="howto">
         <li>You get a real wiki article with every word blacked out — only the word <em>lengths</em> show (like <span class="red">█████</span> <span class="red">███</span>).</li>
-        <li>Type a word and press Enter — every place that word appears in the article is revealed.</li>
+        <li>Type a word and press Enter — every place it appears is revealed. Plural or singular both count (guess <em>dragon</em> or <em>dragons</em>).</li>
         <li>Your real goal is to uncover the hidden <strong>title</strong> at the top. Crack it and you win.</li>
-        <li>Stuck on a word? <strong>Reveal a word</strong> lets you click any blacked-out word in the text to expose it — you get 3 free reveals, but title words stay locked.</li>
-        <li>Need a nudge on the topic? <strong>Hints</strong> opens spoiler-free clues you can reveal one at a time — a category, a summary, the title's first letter, and the source wiki.</li>
-        <li>It's <strong>golf — the lowest score wins</strong>. Correct guesses are free; wrong guesses, word reveals and each hint add points, and the clock ticks up slowly while you play. Every Reveal button shows what it'll cost, and the running total sits in the <strong>Score</strong> badge.</li>
-        <li>A fresh <strong>Daily</strong> puzzle drops every day. In <strong>Settings</strong> you can follow your favourite fandoms (each gets its own daily) and pick which one you land on; open the <strong>☰</strong> menu to browse and play them. Want more? <strong>New game</strong> → curated, full random, a specific fandom, or your own wiki link.</li>
+        <li>Need help? <strong>Hints</strong> opens a panel of clues you reveal one at a time: <strong>Reveal a word</strong> (click any blacked-out body word to expose it — 3 per game, title words stay locked), then spoiler-free tiers — a category, a summary, the first sentence, the title's letters, a synonym, and the source wiki.</li>
+        <li>It's <strong>golf — the lowest score wins</strong>. Correct guesses are free; wrong guesses, reveals and hints add points, and the clock ticks up slowly while you play. Every Reveal button shows what it'll cost, and the running total sits in the <strong>Score</strong> badge.</li>
+        <li>A fresh <strong>Daily</strong> drops every day. Open the <strong>☰</strong> menu to browse the dailies, follow your favourite fandoms (each gets its own daily) and choose which one opens by default. Want more? <strong>New game</strong> → from your followed fandoms, a specific fandom, curated or full random, or your own wiki link.</li>
         <li>When you solve it (or <strong>Give up</strong>), <strong>Share</strong> your result — and check <strong>Daily metrics</strong> to see how everyone else did.</li>
       </ul>
     </div>
@@ -809,6 +800,21 @@
       <button class="modal-x" id="archiveClose" aria-label="Close">&times;</button>
       <h2 class="modal-title" id="archiveModalTitle">Past dailies</h2>
       <div id="archiveModalBody"></div>
+    </div>
+  </div>
+
+  <div class="modal" id="configmodal" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-label="Configure dailies">
+      <button class="modal-x" id="configClose" aria-label="Close">&times;</button>
+      <h2 class="modal-title">Configure dailies</h2>
+      <div class="note" id="settingsNote"></div>
+      <label class="setrow setrow-sel" for="homeDailySelect">
+        <span>Homepage daily</span>
+        <select id="homeDailySelect" class="home-daily-sel"></select>
+      </label>
+      <div class="opt-d">Which daily opens on the homepage — the featured “general” daily, or one of your followed fandoms.</div>
+      <input id="followSearch" class="follow-search" type="text" placeholder="search fandoms…" autocomplete="off">
+      <div class="followlist" id="followList"></div>
     </div>
   </div>
 
@@ -997,12 +1003,32 @@ const mintPlayId = () => (window.crypto && crypto.randomUUID)
   : "r-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
 let currentShare = { kind: "daily" };
 const norm = w => w.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
-// crude singular/plural stem so a title word like "snitch" also covers "snitches"
-// (handles -ies, -es after ch/sh/x/z, and regular -s; leaves "ss" words intact)
-const stemWord = w => w
-  .replace(/ies$/, "y")
-  .replace(/(ch|sh|x|z)es$/, "$1")
-  .replace(/([^s])s$/, "$1");
+// Common irregular plurals the suffix rules can't reach — map each plural to its
+// singular so they share a stem (mouse↔mice, wolf↔wolves, …). Plurals only; we
+// deliberately don't chase every -ves/-oes oddity, just the ones that actually show up.
+const IRREGULAR_PLURALS = {
+  mice:"mouse", men:"man", women:"woman", children:"child", people:"person",
+  feet:"foot", teeth:"tooth", geese:"goose", oxen:"ox", dice:"die",
+  lives:"life", leaves:"leaf", wolves:"wolf", knives:"knife", wives:"wife",
+  elves:"elf", dwarves:"dwarf", halves:"half", selves:"self", shelves:"shelf",
+  thieves:"thief", loaves:"loaf", scarves:"scarf", calves:"calf", hooves:"hoof"
+};
+// crude singular/plural stem so guesses match across word forms: "dragon"↔"dragons",
+// "city"↔"cities", "snitch"↔"snitches", plus the irregulars above. Handles -ies, -es
+// after ch/sh/x/z, and regular -s; leaves "ss" words intact and short words (≤3 chars:
+// is/as/gas/his…) untouched so they aren't mangled. ponytail: PLURALS ONLY — verb tenses
+// (-ing/-ed) and derivational suffixes (-ly/-er) over-merge unrelated words; out of scope.
+const stemWord = w => {
+  if (IRREGULAR_PLURALS[w]) return IRREGULAR_PLURALS[w];
+  if (w.length <= 3) return w;
+  return w
+    .replace(/ies$/, "y")
+    .replace(/(ch|sh|x|z)es$/, "$1")
+    .replace(/([^s])s$/, "$1");
+};
+// the canonical match key for a word: normalised + stemmed. A guess and an article token
+// share a key iff they're the same word up to plural form — so guessing one reveals both.
+const keyOf = w => stemWord(norm(w));
 // a body word is "title-ish" (and so locked from free reveal) if it matches a
 // title word exactly, or shares its singular/plural stem
 const isTitleWord = key => titleKeySet.has(key) || titleStemSet.has(stemWord(key));
@@ -1012,8 +1038,9 @@ function tokenize(text, region) {
   const out = [];
   parts.forEach((p, i) => {
     if (i % 2 === 1) {
-      const key = norm(p);
-      const stop = STOP.has(key);
+      const n = norm(p);
+      const stop = STOP.has(n);           // stop-word test on the RAW norm (stems mangle short words: is→i)
+      const key = stemWord(n);            // match key is the stem, so "dragon" and "dragons" group together
       out.push({ word:p, key, stop, revealed:stop, region }); tokens.push(out[out.length-1]);
     } else if (p) { out.push({ sep:p }); }
   });
@@ -1175,7 +1202,7 @@ function guessRow(g) {
   const row = document.createElement("div");
   // rows with hits are clickable: click cycles through that word in the text
   row.className = "row" + (g.hint ? " hintrow" : (g.hits ? "" : " zero")) + (g.hits ? " nav" : "");
-  if (g.hits) { row.dataset.key = norm(g.word); row.title = "Click to jump to this word in the text"; }
+  if (g.hits) { row.dataset.key = keyOf(g.word); row.title = "Click to jump to this word in the text"; }
   const label = g.hint ? g.word + " (revealed)" : g.word;
   // textContent, not innerHTML — g.word is raw player input (and a restored guess list)
   const wordSpan = document.createElement("span"); wordSpan.textContent = label;
@@ -1320,9 +1347,49 @@ function checkWin() {
     refreshMeta();
     attribution(true);
     submitScore();
+    if (!restoring) confettiBurst();   // celebrate a fresh solve, not a same-day resume
     // the solve is logged by applyGuess's saveDailyState() → recordPlay(), which runs
     // right after this; no explicit call needed here.
   }
+}
+
+// Win celebration: a short canvas confetti burst. Self-contained (no CDN dep),
+// auto-removes, and skipped under the reduce-motion pref. ponytail: ~40 lines of
+// canvas beats pulling in canvas-confetti; swap it in if richer effects are wanted.
+function confettiBurst() {
+  if (document.documentElement.classList.contains("reduce-motion")) return;
+  const cv = document.createElement("canvas");
+  cv.style.cssText = "position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:9999";
+  cv.width = innerWidth; cv.height = innerHeight;
+  document.body.appendChild(cv);
+  const ctx = cv.getContext("2d");
+  const colors = ["#1f9d55", "#e8730c", "#0072b2", "#f4c20d", "#d64545", "#9b59b6"];
+  // launch from the bottom edge, springing upward
+  const parts = Array.from({ length: 140 }, () => ({
+    x: cv.width * (0.2 + Math.random() * 0.6),
+    y: cv.height + 10,
+    vx: (Math.random() - 0.5) * 9,
+    vy: -(12 + Math.random() * 12),
+    s: 5 + Math.random() * 6,
+    rot: Math.random() * Math.PI,
+    vr: (Math.random() - 0.5) * 0.4,
+    c: colors[Math.floor(Math.random() * colors.length)]
+  }));
+  let frames = 0;
+  (function tick() {
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    for (const p of parts) {
+      p.vy += 0.45;                // gravity
+      p.x += p.vx; p.y += p.vy; p.rot += p.vr;
+      ctx.save();
+      ctx.translate(p.x, p.y); ctx.rotate(p.rot);
+      ctx.fillStyle = p.c;
+      ctx.fillRect(-p.s / 2, -p.s / 2, p.s, p.s);
+      ctx.restore();
+    }
+    if (++frames < 220) requestAnimationFrame(tick);
+    else cv.remove();
+  })();
 }
 
 // end the game without solving — reveal the answer and lock everything
@@ -1401,9 +1468,10 @@ function submitGuess() {
   // split multi-word input on whitespace → one guess per word ("my arm" → "my", "arm")
   let attempted = 0, missed = false;
   raw.split(/\s+/).forEach(part => {
-    const key = norm(part);
+    const n = norm(part);
+    const key = stemWord(n);   // match on the stem so "dragons" hits "dragon" (and vice versa)
     // skip empties, already-guessed words, and pre-revealed STOP words ("the") — they don't count
-    if (!key || guessed.has(key) || STOP.has(key)) return;
+    if (!n || guessed.has(key) || STOP.has(n)) return;
     attempted++;
     if (applyGuess(key, part, false) === 0) missed = true;
   });
@@ -2237,10 +2305,12 @@ async function loadFromRevision(wiki, rev, { revealFandom = false } = {}) {
   }
 }
 
-/* ---- Random article: pick a random Fandom wiki, then a random article in it ----
+/* ---- Random article: pick a random wiki, then a random article in it ----
    Fandom has no single "random across all wikis" API and the wiki-listing
-   endpoints are blocked from the browser, so we draw from a broad baked-in pool
-   of content-rich wikis. list=random + origin=* works fine per wiki (CORS ok). */
+   endpoints are blocked from the browser. The live pool comes from the Supabase
+   `wikis` table (getWikiList — same source as dailies/feed/autocomplete); this
+   baked-in list of content-rich wikis is the FALLBACK when the DB is absent/empty.
+   list=random + origin=* works fine per wiki (CORS ok). */
 const RANDOM_WIKIS = [
   "harrypotter.fandom.com", "starwars.fandom.com", "marvel.fandom.com", "dc.fandom.com",
   "minecraft.wiki", "naruto.fandom.com", "onepiece.fandom.com", "pokemon.fandom.com",
@@ -2266,10 +2336,15 @@ function curatedThresholds(round, attempts, relaxFrom) {
 
 // curated = true uses the daily picker's search method; curated = false takes
 // anything with a little text. host (optional) restricts to one specific wiki.
-async function loadRandomArticle(curated, host) {
+// poolOverride: an explicit set of hosts (e.g. "Random from my fandoms" passes the
+// player's follows). When given, host stays null so the source remains a payable hint —
+// you narrowed to a SET, you didn't pick THE wiki.
+async function loadRandomArticle(curated, host, poolOverride) {
   const status = document.getElementById("status"); status.className = "status";
   closeMenu();
-  const pool = host ? [host] : RANDOM_WIKIS;
+  // pull the pool from the Supabase wikis table (same source as dailies/feed/autocomplete),
+  // so enabling a wiki there flows into both random buttons. RANDOM_WIKIS stays the fallback.
+  const pool = poolOverride || (host ? [host] : (await getWikiList()).map(w => w.host));
   if (curated) return loadCuratedArticle(pool, host);
   // full random: anything with a little text, no quality bar
   for (let attempt = 0; attempt < 10; attempt++) {
@@ -3331,7 +3406,7 @@ function showFinishedDaily(didSolve) {
 function replaySavedState(saved) {
   restoring = true;                       // replay without re-saving each step
   // apply every saved guess to the model first, then render ONCE (not per guess)
-  saved.guesses.forEach(g => { const k = norm(g.word); if (k && !guessed.has(k)) recordGuess(k, g.word, !!g.hint); });
+  saved.guesses.forEach(g => { const k = keyOf(g.word); if (k && !guessed.has(k)) recordGuess(k, g.word, !!g.hint); });
   if (typeof saved.hintsLeft === "number") hintsLeft = Math.max(0, saved.hintsLeft);
   if (typeof saved.startedAt === "number" && saved.startedAt > 0) gameStartedAt = saved.startedAt;   // honest duration across resumes
   if (typeof saved.finishedAt === "number" && saved.finishedAt > 0) gameFinishedAt = saved.finishedAt;   // restore the frozen finish so the duration stays put
@@ -3554,7 +3629,7 @@ async function onAuth(session) {
   if (isRealUser()) await mergeLocalFollowsToAccount();
   await loadFollows();
   if (document.getElementById("settingsmodal").classList.contains("open")) syncProfileControls();
-  if (document.getElementById("feedConfig").open) renderFollowList();   // config panel open → refresh its list
+  if (document.getElementById("configmodal").classList.contains("open")) renderFollowList();   // config popup open → refresh its list
   renderFeed();   // the followed set may differ between account and local
 }
 
@@ -4064,6 +4139,20 @@ document.getElementById("newmodal").addEventListener("click", e => {
 });
 document.getElementById("curatedBtn").addEventListener("click", () => loadRandomArticle(true));
 document.getElementById("fullRandomBtn").addEventListener("click", () => loadRandomArticle(false));
+// "Random from my fandoms": a curated page from the player's follows, source kept hidden
+// (you narrowed to a set, didn't pick the wiki). Falls back to a prompt when nothing's followed.
+async function loadMyFandoms() {
+  const enabled = new Set((await getWikiList()).map(w => w.host));
+  const pool = [...follows].filter(h => enabled.has(h));
+  if (!pool.length) {
+    closeMenu();
+    const status = document.getElementById("status"); status.className = "status err";
+    setStatus("Follow a fandom first (daily feed → Configure dailies) to use “Random from my fandoms.”");
+    return;
+  }
+  loadRandomArticle(true, null, pool);
+}
+document.getElementById("myFandomsBtn").addEventListener("click", loadMyFandoms);
 
 // settings modal
 document.getElementById("settingsBtn").addEventListener("click", () => {
@@ -4140,11 +4229,18 @@ document.getElementById("feedBackdrop").addEventListener("click", closeFeed);
 document.getElementById("feedSearch").addEventListener("input", filterFeedCards);
 document.getElementById("followSearch").addEventListener("input", filterFollowList);
 document.getElementById("homeDailySelect").addEventListener("change", e => setHomeDailyPref(e.target.value));
-// "Configure dailies" expander at the top of the drawer: render the follow list when it
-// unfolds; on collapse refresh the feed cards so a freshly-followed fandom shows up.
-document.getElementById("feedConfig").addEventListener("toggle", e => {
-  if (e.target.open) renderFollowList();
-  else if (document.getElementById("feed").classList.contains("open")) renderFeed();
+// "Configure dailies": opens the #configmodal popup (drawer is too cramped for the form on
+// mobile, and the inline <details> scroll-trapped). On close, re-render the feed cards behind
+// it so a freshly-followed fandom shows up instantly.
+function openConfig() { document.getElementById("configmodal").classList.add("open"); renderFollowList(); }
+function closeConfig() {
+  document.getElementById("configmodal").classList.remove("open");
+  if (document.getElementById("feed").classList.contains("open")) renderFeed();
+}
+document.getElementById("feedConfigBtn").addEventListener("click", openConfig);
+document.getElementById("configClose").addEventListener("click", closeConfig);
+document.getElementById("configmodal").addEventListener("click", e => {
+  if (e.target.id === "configmodal") closeConfig();
 });
 document.getElementById("saveNameBtn").addEventListener("click", saveDisplayName);
 document.getElementById("displayNameInput").addEventListener("keydown", e => {
@@ -4199,6 +4295,7 @@ document.addEventListener("keydown", e => {
   document.getElementById("archivemodal").classList.remove("open");
   document.getElementById("optionsmodal").classList.remove("open");
   document.getElementById("authmodal").classList.remove("open");
+  if (document.getElementById("configmodal").classList.contains("open")) closeConfig();
   closeMetrics();
   closeStats();
   closeFeed();
@@ -4699,7 +4796,7 @@ const mp = {
   // host (co-op): replay the current shared board to a newcomer
   _sendSync() {
     this.send("sync", {
-      guesses: (guesses || []).map(g => ({ key: norm(g.word), raw: g.word, hint: !!g.hint, by: g.by || null })),
+      guesses: (guesses || []).map(g => ({ key: keyOf(g.word), raw: g.word, hint: !!g.hint, by: g.by || null })),
       hintsLeft, hints, hintTiers: (hintTiers || []).slice(), fandomUsed: !!fandomUsed, sourceFree: !!sourceFree,
       lettersRevealed: lettersRevealed || 0, letterLits: letterLitsSnapshot(), firstSentenceUsed: !!firstSentenceUsed,
       synonymWords: synonymWords || 0,

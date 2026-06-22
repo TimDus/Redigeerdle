@@ -418,6 +418,11 @@ A cluster of small in-game feedback/affordance touches (all in [index.html](inde
   keeps ticking even though the time-score is frozen at the finish).
 - **Autofocus.** `initGame` focuses `#guess` **only on desktop** (`!mqMobile.matches`) — on
   mobile autofocus would pop the keyboard and shove the layout on every load.
+- **Win confetti.** `checkWin` fires `confettiBurst()` on a fresh solve (guarded by
+  `!restoring`, so a same-day resume of a solved daily doesn't re-fire). It's a self-contained
+  canvas burst (no CDN dep) appended to `<body>` at `z-index:9999; pointer-events:none`,
+  auto-removes after ~220 frames, and is **skipped under `html.reduce-motion`**. Give-up gets
+  none.
 - **"Also visit"** (`#alsoBtn` in the header `.controls`, hidden ≤640px like `#statsBtn`;
   `#optAlsoBtn` in the mobile **Options** menu) opens the static `#alsomodal` — a short
   Jaardle blurb + an external link to `https://jaardle.nl` (hardcoded/trusted, plain `<a
@@ -810,14 +815,18 @@ section (shown only for `isRealUser()`; guests get a "sign in" note):
 
 **Configure dailies** — the daily-feed config (**Homepage daily** picker `#homeDailySelect`
 + the fandom follow list, searchable via `#followSearch` / `filterFollowList()`) **moved out
-of Settings into the feed drawer**: it's a native `<details id="feedConfig" class="feed-config">`
-**at the very top of the `#feed` drawer** (above the cards) whose `<summary>` is the
-**"Configure dailies"** button — clicking it *unfolds* the config inline (a 2nd menu in the
-drawer). It renders **lazily on the `toggle` event** (`renderFollowList()` when it opens —
-`openSettings()` no longer calls it); **collapsing it `renderFeed()`s** so a freshly-followed
-fandom shows up in the cards. `onAuth` re-renders the list only if `#feedConfig.open`. The
-`#settingsNote` ("saved to your account" / "on this device") moved into this panel. Storage
-follows the rule:
+of Settings into the feed drawer**, and is now opened from there as a **popup** (`#configmodal`,
+standard `.modal` pattern — ✕ / backdrop / Esc) rather than an inline expander. The drawer holds
+a single **"Configure dailies"** button (`#feedConfigBtn`, ⚙) at the very top (above the cards);
+`openConfig()` adds `.open` to `#configmodal` and **lazily `renderFollowList()`s**; `closeConfig()`
+(✕ / backdrop / Esc) removes it and — **if the feed drawer is still open behind it** —
+**`renderFeed()`s so a freshly-followed fandom shows up in the cards instantly** on return. (This
+replaced the old `<details id="feedConfig">` inline-unfold, whose body scroll-trapped on mobile:
+the drawer is `overflow:hidden` and the `flex:0 0 auto` config body couldn't scroll once it
+outgrew the panel — a proper scrollable modal fixes it structurally and matches the
+Hints/Social/Options mobile-popup pattern, on **all** widths.) `onAuth` re-renders the list only
+if `#configmodal` is open. The `#settingsNote` ("saved to your account" / "on this device") lives
+in this popup. Storage follows the rule:
 **signed in → the `follows` table** (own-only RLS);
 **logged out → `localStorage` (`redigeerdle:follows`)**. On sign-in, local picks are
 merged into the account (`mergeLocalFollowsToAccount`, idempotent upsert). The wiki list
@@ -993,7 +1002,7 @@ daily selection (the user's ask: selecting a daily was cramped). `.feed-actions`
 `display:none` by default (desktop has New game in `.brand`) and `display:flex` only
 `≤640px`; it's `flex:0 0 auto` so it pins below the scrollable `.feed-cards`. `#feedNewBtn`
 **closes the drawer then `openMenu()`s**. The follow/homepage-daily config lives in the
-drawer's own **Configure dailies** `<details>`, not Settings. **`closeSettings()` just
+drawer's own **Configure dailies** popup (`#configmodal`), not Settings. **`closeSettings()` just
 `renderFeed()`s** (refreshes the feed content in case the drawer is open behind Settings) and
 does **not** navigate the player into the drawer — Settings now opens from the Options menu
 (mobile) / `.controls` (desktop), not from the feed, and the follow config isn't in Settings,
@@ -1119,6 +1128,20 @@ random-rounds search as fallback. The two helpers are duplicated client↔picker
 `badTitle`/the leak filter) — change one, change the other. The picker's `cleanPopularTitles`
 + `biasedIndex` are **exported** and unit-tested in [tests/picker.spec.mjs](tests/picker.spec.mjs).
 
+**The random buttons all draw their wiki pool from the Supabase `wikis` table**
+(`getWikiList()`, same source as the dailies/feed/autocomplete) — `RANDOM_WIKIS` is only the
+baked-in fallback when the DB is absent/empty. `loadRandomArticle(curated, host, poolOverride)`:
+no `host` → the whole enabled pool; a single `host` → that one wiki, **source revealed for
+free** (`fandom_random`, you chose it); a `poolOverride` array → that exact set with `host`
+left null, so the **source stays a payable hint** (you narrowed to a set, didn't pick THE
+wiki). The **New game** modal order is: *Random from my fandoms · Random from a fandom · Custom
+link · Curated random · Full random* (plus the Co-op/Versus cards on top).
+- **"Random from my fandoms"** (`#myFandomsBtn` → `loadMyFandoms`): a curated page drawn from
+  the player's **follows** (∩ enabled wikis), source kept hidden (`loadRandomArticle(true, null,
+  pool)` → `curated_random`). With nothing followed it closes the modal and prompts the player
+  to follow a fandom first. No new `game_type` — it's `curated_random`, and per-fandom stats
+  already `GROUP BY wiki` host, so it slots in correctly.
+
 - **Daily progress / state** is keyed by **puzzle id** (`stateKey(dailyPuzzleId)`), not
   date — fandoms share a date, so date-keying would collide.
 - **Replay-blocking is two-layered.** Same device: `restoreDailyState` replays the
@@ -1222,6 +1245,25 @@ solves that and also records `wiki` on every row, so later **per-fandom aggregat
   later in the day (or a post-finish Hints reveal → `saveDailyState` →
   `recordPlay`) does **not** keep the duration ticking past the solve moment. Cadence is
   the **debounced** write described above (was one-upsert-per-guess).
+
+**Guess matching is STEM-KEYED, so plural/singular forms match.** A token's match key is
+**`keyOf(word) = stemWord(norm(word))`** — the normalised word run through a crude
+singular/plural stemmer (`stemWord`) — NOT the bare `norm()`. So "dragon" and "dragons" get
+the **same key** and guessing either reveals both; same for "city"/"cities",
+"snitch"/"snitches", and the common **irregular plurals** in `IRREGULAR_PLURALS`
+(mouse↔mice, wolf↔wolves, child↔children, …). `stemWord` is **plurals only** — verb tenses
+(`-ing`/`-ed`) and derivational suffixes (`-ly`/`-er`) over-merge unrelated words, so they're
+deliberately out of scope — and it **leaves words ≤3 chars untouched** (the `-s` rule would
+mangle is→i, gas→ga, his→hi…) plus `ss` words intact. **Every key derivation goes through
+`keyOf`/`stemWord`** — the token key (`tokenize`), the typed guess (`submitGuess`), the
+history-jump `data-key`, the saved-state replay (`restoreDailyState`) and the co-op `sync`
+payload — so guesses, free reveals, restore and multiplayer all agree on the same key. The
+**stop-word test stays on the raw `norm`** (`STOP.has(n)`), since stems mangle short function
+words. `titleKeySet` is now stems too, so the title-ish lock (`isTitleWord`, also gating free
+reveal of a title plural) and `titleStemSet` collapse to the same thing (kept, harmless).
+**No save migration:** the daily/solo state stores the guessed *word*, and `keyOf` is
+recomputed on restore — an old save just re-stems on load. The deterministic Golden-Snitch
+fallback test guesses the plural "snitches" to solve "Snitch" (tests/app.spec.mjs).
 
 **Per-guess performance (the hot path).** A guess touches only the tokens for that word, not
 the whole article: `initGame` builds a **`tokensByKey` Map** (`key → token[]`, document order)

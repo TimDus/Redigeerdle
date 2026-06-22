@@ -464,7 +464,7 @@ test("Settings: following a fandom saves to the account when signed in", async (
   await page.evaluate(() => { currentUser = { id: "test-user-id" }; });
 
   await page.click("#feedBtn");
-  await page.click("#feedConfig > summary");
+  await page.click("#feedConfigBtn");
   await expect(page.locator("#settingsNote")).toContainText("account");   // signed-in copy
   const hp = page.locator('#followList input[data-wiki="harrypotter.fandom.com"]');
   await hp.check();
@@ -493,7 +493,7 @@ test("the feed config shows each fandom's display name and icon (emoji + image U
   await page.goto("/");
   await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
   await page.click("#feedBtn");
-  await page.click("#feedConfig > summary");
+  await page.click("#feedConfigBtn");
 
   const hp = page.locator('#followList .followrow', { hasText: "Harry Potter" });
   await expect(hp.locator(".fname")).toHaveText("Harry Potter");       // display name, not the host
@@ -637,7 +637,7 @@ test("Configure dailies: the homepage-daily picker lists 'Featured daily' + foll
 
   // open the feed drawer → "Configure dailies" → the homepage-daily picker
   await page.click("#feedBtn");
-  await page.click("#feedConfig > summary");
+  await page.click("#feedConfigBtn");
   const sel = page.locator("#homeDailySelect");
   await expect(sel.locator("option")).toHaveCount(3);          // "Featured daily" + the 2 followed fandoms
   await expect(sel.locator("option").first()).toHaveText("Featured daily");
@@ -648,9 +648,9 @@ test("Configure dailies: the homepage-daily picker lists 'Featured daily' + foll
   // picking a fandom persists it device-local…
   await sel.selectOption("zelda.fandom.com");
   expect(await page.evaluate(() => localStorage.getItem("redigeerdle:homedaily"))).toBe("zelda.fandom.com");
-  // …and collapsing/re-expanding "Configure dailies" reflects the saved choice
-  await page.click("#feedConfig > summary");   // collapse
-  await page.click("#feedConfig > summary");   // re-expand → repopulates from the saved pref
+  // …and closing/re-opening "Configure dailies" reflects the saved choice
+  await page.click("#configClose");      // close the popup
+  await page.click("#feedConfigBtn");    // re-open → repopulates from the saved pref
   await expect(page.locator("#homeDailySelect")).toHaveValue("zelda.fandom.com");
 
   // switching back to the general daily clears the stored pref

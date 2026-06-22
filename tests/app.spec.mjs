@@ -92,11 +92,19 @@ test("a given-up daily stays ended after reload", async ({ page }) => {
 });
 
 test("a title word's plural can't be free-revealed", async ({ page }) => {
-  // the Golden Snitch article contains "Snitches"; its singular "Snitch" is a
-  // title word, so the plural must be locked from the free reveal too.
-  const snitches = page.locator('#body .red[data-key="snitches"]').first();
-  await expect(snitches).toBeAttached();                 // the word is in the article
-  await expect(snitches).not.toHaveClass(/revealable/);  // but not free-revealable
+  // the Golden Snitch article contains "Snitches"; it now shares the stem key "snitch"
+  // with the title word "Snitch" (stem-matching), so the plural is locked from free reveal too.
+  const snitch = page.locator('#body .red[data-key="snitch"]').first();
+  await expect(snitch).toBeAttached();                 // a snitch-stem word is in the article body
+  await expect(snitch).not.toHaveClass(/revealable/);  // but not free-revealable (title-ish)
+});
+
+test("guessing a plural reveals the singular title word (stem-matching)", async ({ page }) => {
+  // title is "Golden Snitch"; typing the plural "snitches" must match the title word "Snitch".
+  await page.fill("#guess", "golden"); await page.press("#guess", "Enter");
+  await page.fill("#guess", "snitches"); await page.press("#guess", "Enter");
+  await expect(page.locator("#win")).toHaveClass(/show/);
+  await expect(page.locator("#winText")).toContainText("Golden Snitch");
 });
 
 test("daily progress survives a page reload", async ({ page }) => {
@@ -619,7 +627,8 @@ test("article body keeps its block structure (paragraphs + headings)", async ({ 
 test("the feed drawer's 'Configure dailies' opens a fandom list built from the wikis table", async ({ page }) => {
   await page.click("#feedBtn");
   await expect(page.locator("#feed")).toHaveClass(/open/);
-  await page.click("#feedConfig > summary");   // unfold "Configure dailies"
+  await page.click("#feedConfigBtn");   // open "Configure dailies" popup
+  await expect(page.locator("#configmodal")).toHaveClass(/open/);
   // logged out → saved on this device
   await expect(page.locator("#settingsNote")).toContainText("device");
   // one row per wiki from the (stubbed) wikis table
@@ -769,7 +778,7 @@ test("the daily-feed dropdown toggles from the header and prompts you to follow 
 
 test("following a fandom persists to localStorage and survives reload (logged out)", async ({ page }) => {
   await page.click("#feedBtn");
-  await page.click("#feedConfig > summary");
+  await page.click("#feedConfigBtn");
   await page.locator('#followList input[data-wiki="harrypotter.fandom.com"]').check();
   // written to the local cache
   const stored = await page.evaluate(() => localStorage.getItem("redigeerdle:follows"));
@@ -778,7 +787,7 @@ test("following a fandom persists to localStorage and survives reload (logged ou
   await page.reload();
   await expect(page.locator("#guess")).toBeEnabled({ timeout: 20_000 });
   await page.click("#feedBtn");
-  await page.click("#feedConfig > summary");
+  await page.click("#feedConfigBtn");
   await expect(page.locator('#followList input[data-wiki="harrypotter.fandom.com"]')).toBeChecked();
   await expect(page.locator('#followList input[data-wiki="zelda.fandom.com"]')).not.toBeChecked();
 });
